@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-all: aws/efs ceph/cephfs ceph/rbd flex gluster/block gluster/glusterfs iscsi/targetd local-volume/provisioner nfs-client nfs snapshot openstack/standalone-cinder
+all: aws/efs ceph/cephfs ceph/rbd flex gluster/block gluster/simple iscsi/targetd local-volume/provisioner nfs-client nfs snapshot openstack/standalone-cinder
 .PHONY: all
 
-clean: clean-aws/efs clean-ceph/cephfs clean-ceph/rbd clean-flex clean-gluster/block clean-gluster/glusterfs clean-iscsi/targetd clean-local-volume/provisioner clean-nfs-client clean-nfs clean-openebs clean-snapshot clean-openstack/standalone-cinder
+clean: clean-aws/efs clean-ceph/cephfs clean-ceph/rbd clean-flex clean-gluster/block clean-gluster/simple clean-iscsi/targetd clean-local-volume/provisioner clean-nfs-client clean-nfs clean-openebs clean-snapshot clean-openstack/standalone-cinder
 .PHONY: clean
 
 
@@ -82,15 +82,15 @@ clean-gluster/block:
 	make clean
 .PHONY: clean-gluster/block
 
-gluster/glusterfs:
-	cd gluster/glusterfs; \
+gluster/simple:
+	cd gluster/simple; \
 	make container
-.PHONY: gluster/glusterfs
+.PHONY: gluster/simple
 
-clean-gluster/glusterfs:
-	cd gluster/glusterfs; \
+clean-gluster/simple:
+	cd gluster/simple; \
 	make clean
-.PHONY: clean-gluster/glusterfs
+.PHONY: clean-gluster/simple
 
 iscsi/targetd:
 	cd iscsi/targetd; \
@@ -208,7 +208,7 @@ push-glusterblock-provisioner:
 .PHONY: push-glusterblock-provisioner
 
 push-glusterfs-simple-provisioner:
-	cd gluster/glusterfs; \
+	cd gluster/simple; \
 	make push
 .PHONY: push-glusterfs-simple-provisioner
 

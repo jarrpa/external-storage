@@ -21,7 +21,7 @@ import (
 	"strings"
 
 	"github.com/golang/glog"
-	vol "github.com/kubernetes-incubator/external-storage/gluster/glusterfs/pkg/volume"
+	vol "github.com/kubernetes-incubator/external-storage/gluster/simple/pkg/volume"
 	"github.com/kubernetes-incubator/external-storage/lib/controller"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
