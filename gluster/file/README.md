@@ -6,27 +6,23 @@ quay.io/external_storage/glusterfile-provisioner:latest
 ```
 ## What is the GlusterFS Provisioner?
 
-The GlusterFS Provisioner is an external provisioner which dynamically provision GlusterFS volumes  on demand. The persistent Volume Claim which has been requested with this external provisioner's identity ( for eg# `gluster.org/glusterfs`)  will be served by this provisioner.
+The GlusterFS Provisioner is an external provisioner which dynamically provision GlusterFS volumes on demand. The PersistentVolumeClaim which has been requested with this external provisioner's identity (e.g. `gluster.org/glusterfs`)  will be served by this provisioner. This project is related to and relies on the following projects:
 
-[GlusterFS](https://github.com/gluster/glusterfs)
-[heketi](https://github.com/heketi/heketi)
-[gluster-kubernetes](https://github.com/gluster/gluster-kubernetes)
+* [GlusterFS](https://github.com/gluster/glusterfs)
+* [heketi](https://github.com/heketi/heketi) - GlusterFS volume management REST API
+* [gluster-kubernetes](https://github.com/gluster/gluster-kubernetes) - Kubernetes integrations for GlusterFS
 
 ## Build GlusterFS Provisioner and container image
 
-If you want to build the container from source instead of pulling the docker image, please follow below steps:
+If you want to build the container from source instead of pulling the docker image, simply run the following from the `glusterfs/file/` directory:
 
- Step 1: Build the provisioner binary
 ```
-[root@localhost]# go build glusterfs-provisioner.go
-```
-
-Step 2:  Get GlusterFS Provisioner Container image
-```
-[root@localhost]# docker pull quay.io/external_storage/glusterfile-provisioner:latest
+[root@localhost]# make container
 ```
 
 ## Start Kubernetes Cluster
+
+The following steps assume you have a Kubernetes cluster up and running.
 
 ## Start GlusterFS Provisioner
 
@@ -52,16 +48,14 @@ parameters:
     restsecretname: "heketi-secret"
 ```
 
-* `resturl` : Gluster REST service/Heketi service url which provision GlusterFS volumes on demand. The general format should be `IPaddress:Port` and this is a mandatory parameter for GlusterFS dynamic provisioner. If Heketi service is exposed as a routable service in openshift/kubernetes setup, this can have a format similar to
+* `resturl` : heketi service url which provision GlusterFS volumes on demand. The general format should be `IPaddress:Port` and this is a mandatory parameter for GlusterFS dynamic provisioner. If Heketi service is exposed as a routable service in openshift/kubernetes setup, this can have a format similar to
 `http://heketi-storage-project.cloudapps.mystorage.com` where the fqdn is a resolvable heketi service url.
 
-* `restuser` : Gluster REST service/Heketi user who has access to create volumes in the Gluster Trusted Pool.
+* `restuser` : heketi user who has access to create volumes in the GlusterFS Trusted Pool.
 
-* `restsecretnamespace` + `restsecretname` : Identification of Secret instance that contains user password to use when talking to Gluster REST service. These parameters are optional, empty password will be used when both `restsecretnamespace` and `restsecretname` are omitted. The provided secret must have type "gluster.org/glusterfs".
+* `restsecretnamespace` + `restsecretname` : Namespace and Name of the Secret instance that contains user password to use when talking to heketi. These parameters are optional, An empty password will be used when both `restsecretnamespace` and `restsecretname` are omitted. The provided secret must have type matching your provisioner ID (e.g. `gluster.org/glusterfs`).
 
-## How to test:
-
-### Create a claim
+## Testing: Create a PersistentVolumeClaim
 
 ```
 [root@localhost]# kubectl create -f examples/claim1.yaml
