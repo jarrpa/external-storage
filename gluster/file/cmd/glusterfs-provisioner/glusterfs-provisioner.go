@@ -40,11 +40,11 @@ import (
 )
 
 const (
-	provisionerName    = "gluster.org/glusterfile"
+	provisionerName    = "gluster.org/glusterfs"
 	provisionerNameKey = "PROVISIONER_NAME"
 	descAnn            = "Gluster-external: Dynamically provisioned PV"
 	restStr            = "server"
-	dynamicEpSvcPrefix = "glusterfile-dynamic-"
+	dynamicEpSvcPrefix = "glusterfs-dynamic-"
 	replicaCount       = 3
 	secretKeyName      = "key" // key name used in secret
 	volPrefix          = "vol_"
@@ -54,7 +54,7 @@ const (
 	gidAnn             = "pv.beta.kubernetes.io/gid"
 )
 
-type glusterfileProvisioner struct {
+type glusterfsProvisioner struct {
 	client   kubernetes.Interface
 	identity string
 	provisionerConfig
@@ -77,18 +77,18 @@ type provisionerConfig struct {
 	volumeNamePrefix string
 }
 
-//NewglusterfileProvisioner create a new provisioner.
-func NewglusterfileProvisioner(client kubernetes.Interface, id string) controller.Provisioner {
-	return &glusterfileProvisioner{
+//NewGlusterfsProvisioner create a new provisioner.
+func NewGlusterfsProvisioner(client kubernetes.Interface, id string) controller.Provisioner {
+	return &glusterfsProvisioner{
 		client:    client,
 		identity:  id,
 		allocator: gidallocator.New(client),
 	}
 }
 
-var _ controller.Provisioner = &glusterfileProvisioner{}
+var _ controller.Provisioner = &glusterfsProvisioner{}
 
-func (p *glusterfileProvisioner) GetAccessModes() []v1.PersistentVolumeAccessMode {
+func (p *glusterfsProvisioner) GetAccessModes() []v1.PersistentVolumeAccessMode {
 	return []v1.PersistentVolumeAccessMode{
 		v1.ReadWriteMany,
 		v1.ReadOnlyMany,
@@ -97,7 +97,7 @@ func (p *glusterfileProvisioner) GetAccessModes() []v1.PersistentVolumeAccessMod
 }
 
 // Provision creates a storage asset and returns a PV object representing it.
-func (p *glusterfileProvisioner) Provision(options controller.VolumeOptions) (*v1.PersistentVolume, error) {
+func (p *glusterfsProvisioner) Provision(options controller.VolumeOptions) (*v1.PersistentVolume, error) {
 
 	if options.PVC.Spec.Selector != nil {
 		return nil, fmt.Errorf(" claim Selector is not supported")
@@ -184,7 +184,7 @@ func (p *glusterfileProvisioner) Provision(options controller.VolumeOptions) (*v
 	return pv, nil
 }
 
-func (p *glusterfileProvisioner) CreateVolume(gid *int, config *provisionerConfig, sz int) (r *v1.GlusterfsVolumeSource, size int, volID string, err error) {
+func (p *glusterfsProvisioner) CreateVolume(gid *int, config *provisionerConfig, sz int) (r *v1.GlusterfsVolumeSource, size int, volID string, err error) {
 	var clusterIDs []string
 	customVolumeName := ""
 
@@ -247,7 +247,7 @@ func (p *glusterfileProvisioner) CreateVolume(gid *int, config *provisionerConfi
 	}, sz, volID, nil
 }
 
-func (p *glusterfileProvisioner) createEndpointService(namespace string, epServiceName string, hostips []string, pvcname string) (endpoint *v1.Endpoints, service *v1.Service, err error) {
+func (p *glusterfsProvisioner) createEndpointService(namespace string, epServiceName string, hostips []string, pvcname string) (endpoint *v1.Endpoints, service *v1.Service, err error) {
 
 	addrlist := make([]v1.EndpointAddress, len(hostips))
 	for i, v := range hostips {
@@ -350,7 +350,7 @@ func getVolumeID(pv *v1.PersistentVolume, volumeName string) (string, error) {
 	return volumeID, nil
 }
 
-func (p *glusterfileProvisioner) Delete(volume *v1.PersistentVolume) error {
+func (p *glusterfsProvisioner) Delete(volume *v1.PersistentVolume) error {
 
 	glog.V(1).Infof("deleting volume ")
 
@@ -434,7 +434,7 @@ func (p *glusterfileProvisioner) Delete(volume *v1.PersistentVolume) error {
 	return nil
 
 }
-func (p *glusterfileProvisioner) deleteEndpointService(namespace string, epServiceName string) (err error) {
+func (p *glusterfsProvisioner) deleteEndpointService(namespace string, epServiceName string) (err error) {
 	kubeClient := p.client
 	if kubeClient == nil {
 		return fmt.Errorf("failed to get kube client when deleting endpoint service")
@@ -503,7 +503,7 @@ func convertVolumeParam(volumeString string) (int, error) {
 }
 
 // parseClassParameters parses StorageClass.Parameters
-func (p *glusterfileProvisioner) parseClassParameters(params map[string]string, kubeclient kubernetes.Interface) (*provisionerConfig, error) {
+func (p *glusterfsProvisioner) parseClassParameters(params map[string]string, kubeclient kubernetes.Interface) (*provisionerConfig, error) {
 	var cfg provisionerConfig
 	var err error
 
@@ -685,7 +685,7 @@ func main() {
 
 	// Create the provisioner: it implements the Provisioner interface expected by
 	// the controller
-	glusterfileProvisioner := NewglusterfileProvisioner(clientset, prName)
+	glusterfsProvisioner := NewGlusterfsProvisioner(clientset, prName)
 
 	// Start the provision controller which will dynamically provision glusterfs
 	// PVs
@@ -693,7 +693,7 @@ func main() {
 	pc := controller.NewProvisionController(
 		clientset,
 		prName,
-		glusterfileProvisioner,
+		glusterfsProvisioner,
 		serverVersion.GitVersion,
 	)
 

@@ -16,6 +16,6 @@ FROM centos:7
 
 MAINTAINER Humble Chirammal <hchiramm@redhat.com>
 
-ADD glusterfile-provisioner /usr/local/bin/glusterfile-provisioner
+ADD glusterfs-provisioner /usr/local/bin/glusterfs-provisioner
 
-ENTRYPOINT ["/usr/local/bin/glusterfile-provisioner"] 
+ENTRYPOINT ["/usr/local/bin/glusterfs-provisioner"]

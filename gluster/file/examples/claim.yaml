@@ -3,7 +3,7 @@ apiVersion: v1
 metadata:
   name: claimheketi
   annotations:
-    volume.beta.kubernetes.io/storage-class: "glusterfile"
+    volume.beta.kubernetes.io/storage-class: "glusterfs"
 spec:
   accessModes:
     - ReadWriteMany

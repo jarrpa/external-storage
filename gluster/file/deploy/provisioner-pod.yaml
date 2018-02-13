@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Pod
 metadata: 
-  name: glusterfile-provisioner
+  name: glusterfs-provisioner
 spec: 
   containers: 
     - 
       env: 
         - 
           name: PROVISIONER_NAME
-          value: gluster.org/glusterfile
+          value: gluster.org/glusterfs
       image: "quay.io/external_storage/glusterfile-provisioner:latest"
-      name: glusterfile-provisioner
+      name: glusterfs-provisioner

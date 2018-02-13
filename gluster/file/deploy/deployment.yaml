@@ -1,7 +1,7 @@
 apiVersion: extensions/v1beta1
 kind: Deployment
 metadata:
-  name: glusterfile-provisioner
+  name: glusterfs-provisioner
 spec:
   replicas: 1
   strategy:
@@ -9,11 +9,11 @@ spec:
   template:
     metadata:
       labels:
-        app: glusterfile-provisioner
+        app: glusterfs-provisioner
     spec:
       containers:
           env:
               name: PROVISIONER_NAME
-              value: gluster.org/glusterfile
+              value: gluster.org/glusterfs
           image: "quay.io/external_storage/glusterfile-provisioner:latest"
-          name: glusterfile-provisioner
+          name: glusterfs-provisioner

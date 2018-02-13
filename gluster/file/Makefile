@@ -37,7 +37,7 @@ all build:
 		-v $$(pwd)/.go/stdlib:/usr/local/go/pkg/linux_amd64_asdf \
 		-w /go/src/github.com/kubernetes-incubator/external-storage/gluster/file \
 		golang:1.8.3-alpine \
-		go install -installsuffix "asdf" ./cmd/glusterfile-provisioner
+		go install -installsuffix "asdf" ./cmd/glusterfs-provisioner
 .PHONY: all build
 
 container: build quick-container
@@ -59,6 +59,6 @@ test:
 
 clean:
 	rm -rf .go
-	rm -f glusterfile-provisioner
+	rm -f glusterfs-provisioner
 .PHONY: clean
 
