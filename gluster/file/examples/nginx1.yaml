@@ -2,12 +2,12 @@ apiVersion: v1
 kind: Pod
 metadata: 
   labels: 
-    name: glusterfs-pod2
-  name: glusterfs-pod2
+    name: nginx-pod
+  name: nginx-pod
 spec: 
   containers:
       image: "gcr.io/google_containers/nginx-slim:0.8"
-      name: glusterfs-pod2
+      name: nginx-pod
       ports:
           containerPort: 80
           name: web
@@ -15,9 +15,9 @@ spec:
         privileged: true
       volumeMounts:
           mountPath: /usr/share/nginx/html
-          name: glusterfs-vol1
+          name: glusterfs-vol
   volumes:
-      name: glusterfs-vol1
+      name: glusterfs-vol
       persistentVolumeClaim: 
-        claimName: claim1
+        claimName: glusterfs-claim
 

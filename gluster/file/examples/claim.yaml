@@ -1,7 +1,7 @@
 kind: PersistentVolumeClaim
 apiVersion: v1
 metadata:
-  name: claimheketi
+  name: glusterfs-claim
   annotations:
     volume.beta.kubernetes.io/storage-class: "glusterfs"
 spec:
