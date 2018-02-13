@@ -11,6 +11,7 @@ spec:
       labels:
         app: glusterfs-provisioner
     spec:
+      serviceAccountName: glusterfs-provisioner
       containers:
           env:
               name: PROVISIONER_NAME
