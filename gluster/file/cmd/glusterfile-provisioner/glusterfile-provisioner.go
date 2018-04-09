@@ -84,6 +84,7 @@ type provisionerConfig struct {
 	volumeType       gapi.VolumeDurabilityInfo
 	volumeOptions    []string
 	volumeNamePrefix string
+	snapFactor       float32
 }
 
 //NewglusterfileProvisioner create a new provisioner.
@@ -353,8 +354,14 @@ func (p *glusterfileProvisioner) annotateClonedPVC(VolID string, pvc *v1.Persist
 func (p *glusterfileProvisioner) CreateVolume(gid *int, config *provisionerConfig, sz int) (r *v1.GlusterfsVolumeSource, size int, volID string, err error) {
 	var clusterIDs []string
 	customVolumeName := ""
+	snapFactor := float32(1.0)
 
 	glog.V(2).Infof("create volume of size %dGiB and configuration %+v", sz, config)
+
+	if config.snapFactor != 1.0 {
+		snapFactor = config.snapFactor
+		glog.V(2).Infof("using a snapshot factor of %v", snapFactor)
+	}
 
 	if config.url == "" {
 		glog.Errorf("REST server endpoint is empty")
@@ -377,7 +384,14 @@ func (p *glusterfileProvisioner) CreateVolume(gid *int, config *provisionerConfi
 	}
 
 	gid64 := int64(*gid)
-	volumeReq := &gapi.VolumeCreateRequest{Size: sz, Name: customVolumeName, Clusters: clusterIDs, Gid: gid64, Durability: config.volumeType, GlusterVolumeOptions: p.volumeOptions}
+	snaps := struct {
+		Enable bool    `json:"enable"`
+		Factor float32 `json:"factor"`
+	}{
+		true,
+		snapFactor,
+	}
+	volumeReq := &gapi.VolumeCreateRequest{Size: sz, Name: customVolumeName, Clusters: clusterIDs, Gid: gid64, Durability: config.volumeType, GlusterVolumeOptions: p.volumeOptions, Snapshot: snaps}
 	volume, err := cli.VolumeCreate(volumeReq)
 	if err != nil {
 		glog.Errorf("failed to create gluster volume: %v", err)
@@ -750,6 +764,7 @@ func (p *glusterfileProvisioner) parseClassParameters(params map[string]string, 
 	parseVolumeType := ""
 	parseVolumeOptions := ""
 	parseVolumeNamePrefix := ""
+	snapFactor := 1.0
 
 	for k, v := range params {
 		switch dstrings.ToLower(k) {
@@ -784,6 +799,16 @@ func (p *glusterfileProvisioner) parseClassParameters(params map[string]string, 
 		case "gidmin":
 		case "gidmax":
 		case "smartclone":
+		case "snapfactor":
+			snapFactor, err = strconv.ParseFloat(v, 32)
+			if err != nil {
+				return nil, fmt.Errorf("error converting %v to float: %v", v, err)
+			}
+			if snapFactor < 1.0 {
+				return nil, fmt.Errorf("invalid snapshot factor %v, must be greater than or equal to 1.0", snapFactor)
+			}
+			cfg.snapFactor = float32(snapFactor)
+
 		default:
 			return nil, fmt.Errorf("invalid option %q for volume plugin %s", k, provisionerName)
 		}
@@ -867,6 +892,7 @@ func (p *glusterfileProvisioner) parseClassParameters(params map[string]string, 
 		}
 		cfg.volumeNamePrefix = parseVolumeNamePrefix
 	}
+
 	return &cfg, nil
 }
 
