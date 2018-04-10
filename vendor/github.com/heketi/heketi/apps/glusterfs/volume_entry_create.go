@@ -15,11 +15,11 @@ import (
 
 	"github.com/boltdb/bolt"
 	"github.com/heketi/heketi/executors"
-	"github.com/heketi/heketi/pkg/utils"
+	wdb "github.com/heketi/heketi/pkg/db"
 	"github.com/lpabon/godbc"
 )
 
-func (v *VolumeEntry) createVolume(db *bolt.DB,
+func (v *VolumeEntry) createVolume(db wdb.RODB,
 	executor executors.Executor,
 	brick_entries []*BrickEntry) error {
 
@@ -34,14 +34,18 @@ func (v *VolumeEntry) createVolume(db *bolt.DB,
 	}
 
 	// Create the volume
-	_, err = executor.VolumeCreate(host, vr)
-	if err != nil {
+	if _, err := executor.VolumeCreate(host, vr); err != nil {
 		return err
 	}
+	return nil
+}
+
+func (v *VolumeEntry) updateMountInfo(db wdb.RODB) error {
+	godbc.Require(v.Info.Cluster != "")
 
 	// Get all brick hosts
-	stringset := utils.NewStringSet()
-	err = db.View(func(tx *bolt.Tx) error {
+	hosts := []string{}
+	if err := db.View(func(tx *bolt.Tx) error {
 		cluster, err := NewClusterEntryFromId(tx, v.Info.Cluster)
 		if err != nil {
 			return err
@@ -51,28 +55,28 @@ func (v *VolumeEntry) createVolume(db *bolt.DB,
 			if err != nil {
 				return err
 			}
-			stringset.Add(node.StorageHostName())
+			hosts = append(hosts, node.StorageHostName())
 		}
 		return err
-	})
+	}); err != nil {
+		return err
+	}
 
-	hosts := stringset.Strings()
 	v.Info.Mount.GlusterFS.Hosts = hosts
 
 	// Save volume information
 	v.Info.Mount.GlusterFS.MountPoint = fmt.Sprintf("%v:%v",
-		hosts[0], vr.Name)
+		hosts[0], v.Info.Name)
 
 	// Set glusterfs mount volfile-servers options
 	v.Info.Mount.GlusterFS.Options = make(map[string]string)
 	v.Info.Mount.GlusterFS.Options["backup-volfile-servers"] =
 		strings.Join(hosts[1:], ",")
 
-	godbc.Ensure(v.Info.Mount.GlusterFS.MountPoint != "")
 	return nil
 }
 
-func (v *VolumeEntry) createVolumeRequest(db *bolt.DB,
+func (v *VolumeEntry) createVolumeRequest(db wdb.RODB,
 	brick_entries []*BrickEntry) (*executors.VolumeRequest, string, error) {
 	godbc.Require(db != nil)
 	godbc.Require(brick_entries != nil)
@@ -111,6 +115,7 @@ func (v *VolumeEntry) createVolumeRequest(db *bolt.DB,
 	vr.Name = v.Info.Name
 	v.Durability.SetExecutorVolumeRequest(vr)
 	vr.GlusterVolumeOptions = v.GlusterVolumeOptions
+	vr.Arbiter = v.HasArbiterOption()
 
 	return vr, sshhost, nil
 }

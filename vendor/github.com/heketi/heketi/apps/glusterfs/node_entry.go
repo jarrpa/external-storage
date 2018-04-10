@@ -17,6 +17,7 @@ import (
 
 	"github.com/boltdb/bolt"
 	"github.com/heketi/heketi/executors"
+	wdb "github.com/heketi/heketi/pkg/db"
 	"github.com/heketi/heketi/pkg/glusterfs/api"
 	"github.com/heketi/heketi/pkg/utils"
 	"github.com/lpabon/godbc"
@@ -70,7 +71,7 @@ func (n *NodeEntry) registerStorageKey(host string) string {
 }
 
 // Verify gluster process in the node and return the manage hostname of a node in the cluster
-func GetVerifiedManageHostname(db *bolt.DB, e executors.Executor, clusterId string) (string, error) {
+func GetVerifiedManageHostname(db wdb.RODB, e executors.Executor, clusterId string) (string, error) {
 	godbc.Require(clusterId != "")
 	var cluster *ClusterEntry
 	var node *NodeEntry
@@ -278,59 +279,7 @@ func (n *NodeEntry) Delete(tx *bolt.Tx) error {
 	return EntryDelete(tx, n, n.Info.Id)
 }
 
-func (n *NodeEntry) removeAllDisksFromRing(tx *bolt.Tx,
-	a Allocator) error {
-
-	cluster, err := NewClusterEntryFromId(tx, n.Info.ClusterId)
-	if err != nil {
-		return err
-	}
-
-	for _, deviceId := range n.Devices {
-		device, err := NewDeviceEntryFromId(tx, deviceId)
-		if err != nil {
-			return err
-		}
-
-		// Remove device
-		err = a.RemoveDevice(cluster, n, device)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (n *NodeEntry) addAllDisksToRing(tx *bolt.Tx,
-	a Allocator) error {
-
-	cluster, err := NewClusterEntryFromId(tx, n.Info.ClusterId)
-	if err != nil {
-		return err
-	}
-
-	// Add all devices
-	for _, deviceId := range n.Devices {
-		device, err := NewDeviceEntryFromId(tx, deviceId)
-		if err != nil {
-			return err
-		}
-
-		// Add device
-		if device.isOnline() {
-			err = a.AddDevice(cluster, n, device)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-func (n *NodeEntry) SetState(db *bolt.DB, e executors.Executor,
-	a Allocator,
+func (n *NodeEntry) SetState(db wdb.DB, e executors.Executor,
 	s api.EntryState) error {
 
 	// Check current state
@@ -355,17 +304,11 @@ func (n *NodeEntry) SetState(db *bolt.DB, e executors.Executor,
 		case api.EntryStateOnline:
 			return nil
 		case api.EntryStateOffline:
-			// Remove all disks from Ring
 			err := db.Update(func(tx *bolt.Tx) error {
-				err := n.removeAllDisksFromRing(tx, a)
-				if err != nil {
-					return err
-				}
-
 				// Save state
 				n.State = s
 				// Save new state
-				err = n.Save(tx)
+				err := n.Save(tx)
 				if err != nil {
 					return err
 				}
@@ -386,14 +329,9 @@ func (n *NodeEntry) SetState(db *bolt.DB, e executors.Executor,
 		case api.EntryStateOffline:
 			return nil
 		case api.EntryStateOnline:
-			// Add all disks back
 			err := db.Update(func(tx *bolt.Tx) error {
-				err := n.addAllDisksToRing(tx, a)
-				if err != nil {
-					return err
-				}
 				n.State = s
-				err = n.Save(tx)
+				err := n.Save(tx)
 				if err != nil {
 					return err
 				}
@@ -413,7 +351,7 @@ func (n *NodeEntry) SetState(db *bolt.DB, e executors.Executor,
 					}
 					return nil
 				})
-				err = d.Remove(db, e, a)
+				err = d.Remove(db, e)
 				if err != nil {
 					if err == ErrNoReplacement {
 						return logger.LogError("Unable to remove node [%v] as no device was found to replace device [%v]", n.Info.Id, d.Id())
@@ -506,5 +444,30 @@ func (n *NodeEntry) DeviceDelete(id string) {
 }
 
 func NodeEntryUpgrade(tx *bolt.Tx) error {
+	return nil
+}
+
+func NodeList(tx *bolt.Tx) ([]string, error) {
+
+	list := EntryKeys(tx, BOLTDB_BUCKET_NODE)
+	if list == nil {
+		return nil, ErrAccessList
+	}
+	return list, nil
+}
+
+func (n *NodeEntry) DeleteBricksWithEmptyPath(tx *bolt.Tx) error {
+
+	for _, deviceid := range n.Devices {
+		device, err := NewDeviceEntryFromId(tx, deviceid)
+		if err != nil {
+			return err
+		}
+
+		err = device.DeleteBricksWithEmptyPath(tx)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }

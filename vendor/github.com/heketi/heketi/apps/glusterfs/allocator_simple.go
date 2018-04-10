@@ -11,184 +11,136 @@ package glusterfs
 
 import (
 	"github.com/boltdb/bolt"
-	"sync"
+	wdb "github.com/heketi/heketi/pkg/db"
 )
 
 // Simple allocator contains a map to rings of clusters
 type SimpleAllocator struct {
-	rings map[string]*SimpleAllocatorRing
-	lock  sync.Mutex
 }
 
 // Create a new simple allocator
 func NewSimpleAllocator() *SimpleAllocator {
 	s := &SimpleAllocator{}
-	s.rings = make(map[string]*SimpleAllocatorRing)
 	return s
 }
 
-// Create a new simple allocator and initialize it with data from the db
-func NewSimpleAllocatorFromDb(db *bolt.DB) *SimpleAllocator {
+func loadRingFromDB(tx *bolt.Tx, clusterId string) (*SimpleAllocatorRing, error) {
+	cluster, err := NewClusterEntryFromId(tx, clusterId)
+	if err != nil {
+		return nil, err
+	}
 
-	s := NewSimpleAllocator()
+	ring := NewSimpleAllocatorRing()
 
-	err := db.View(func(tx *bolt.Tx) error {
-		clusters, err := ClusterList(tx)
+	for _, nodeId := range cluster.Info.Nodes {
+		node, err := NewNodeEntryFromId(tx, nodeId)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
-		for _, clusterId := range clusters {
-			cluster, err := NewClusterEntryFromId(tx, clusterId)
+		// Check node is online
+		if !node.isOnline() {
+			continue
+		}
+
+		for _, deviceId := range node.Devices {
+			device, err := NewDeviceEntryFromId(tx, deviceId)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
-			for _, nodeId := range cluster.Info.Nodes {
-				node, err := NewNodeEntryFromId(tx, nodeId)
-				if err != nil {
-					return err
-				}
-
-				// Check node is online
-				if !node.isOnline() {
-					continue
-				}
-
-				for _, deviceId := range node.Devices {
-					device, err := NewDeviceEntryFromId(tx, deviceId)
-					if err != nil {
-						return err
-					}
-
-					// Check device is online
-					if !device.isOnline() {
-						continue
-					}
-
-					// Add device to ring
-					err = s.AddDevice(cluster, node, device)
-					if err != nil {
-						return err
-					}
-
-				}
+			// Check device is online
+			if !device.isOnline() {
+				continue
 			}
+
+			// Add device to ring
+			ring.Add(&SimpleDevice{
+				zone:     node.Info.Zone,
+				nodeId:   node.Info.Id,
+				deviceId: device.Info.Id,
+			})
 		}
-		return nil
+	}
+
+	return ring, nil
+}
+
+func loadRingFromDeviceSource(dsrc DeviceSource) (
+	*SimpleAllocatorRing, error) {
+
+	ring := NewSimpleAllocatorRing()
+	dnl, err := dsrc.Devices()
+	if err != nil {
+		return nil, err
+	}
+	for _, dan := range dnl {
+		ring.Add(&SimpleDevice{
+			zone:     dan.Node.Info.Zone,
+			nodeId:   dan.Node.Info.Id,
+			deviceId: dan.Device.Info.Id,
+		})
+	}
+	return ring, nil
+}
+
+func getDeviceListFromDB(db wdb.RODB, clusterId,
+	brickId string) (SimpleDevices, error) {
+
+	var ring *SimpleAllocatorRing
+	err := db.View(func(tx *bolt.Tx) (e error) {
+		ring, e = loadRingFromDB(tx, clusterId)
+		return e
 	})
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
-	return s
-
-}
-
-func (s *SimpleAllocator) AddDevice(cluster *ClusterEntry,
-	node *NodeEntry,
-	device *DeviceEntry) error {
-
-	s.lock.Lock()
-	defer s.lock.Unlock()
-
-	// Create a new cluster id if one is not available
-	clusterId := cluster.Info.Id
-	if _, ok := s.rings[clusterId]; !ok {
-		s.rings[clusterId] = NewSimpleAllocatorRing()
-	}
-
-	s.rings[clusterId].Add(&SimpleDevice{
-		zone:     node.Info.Zone,
-		nodeId:   node.Info.Id,
-		deviceId: device.Info.Id,
-	})
-
-	return nil
-
-}
-
-func (s *SimpleAllocator) RemoveDevice(cluster *ClusterEntry,
-	node *NodeEntry,
-	device *DeviceEntry) error {
-
-	s.lock.Lock()
-	defer s.lock.Unlock()
-
-	// Check the cluster id is in the map
-	clusterId := cluster.Info.Id
-	if _, ok := s.rings[clusterId]; !ok {
-		logger.LogError("Unknown cluster id requested: %v", clusterId)
-		return ErrNotFound
-	}
-
-	// Remove device from ring
-	s.rings[clusterId].Remove(&SimpleDevice{
-		zone:     node.Info.Zone,
-		nodeId:   node.Info.Id,
-		deviceId: device.Info.Id,
-	})
-
-	return nil
-}
-
-func (s *SimpleAllocator) RemoveCluster(clusterId string) error {
-
-	s.lock.Lock()
-	defer s.lock.Unlock()
-
-	// Check the cluster id is in the map
-	if _, ok := s.rings[clusterId]; !ok {
-		logger.LogError("Unknown cluster id requested: %v", clusterId)
-		return ErrNotFound
-	}
-
-	// Remove cluster from map
-	delete(s.rings, clusterId)
-
-	return nil
-}
-
-func (s *SimpleAllocator) getDeviceList(clusterId, brickId string) (SimpleDevices, error) {
-	s.lock.Lock()
-	defer s.lock.Unlock()
-
-	if _, ok := s.rings[clusterId]; !ok {
-		logger.LogError("Unknown cluster id requested: %v", clusterId)
-		return nil, ErrNotFound
-	}
-
-	ring := s.rings[clusterId]
-	ring.Rebalance()
 	devicelist := ring.GetDeviceList(brickId)
 
 	return devicelist, nil
-
 }
 
-func (s *SimpleAllocator) GetNodes(clusterId, brickId string) (<-chan string,
-	chan<- struct{}, <-chan error) {
+func (s *SimpleAllocator) GetNodes(db wdb.RODB, clusterId,
+	brickId string) (<-chan string, chan<- struct{}, error) {
 
-	// Initialize channels
 	device, done := make(chan string), make(chan struct{})
 
-	// Make sure to make a buffered channel for the error, so we can
-	// set it and return
-	errc := make(chan error, 1)
-
-	// Get the list of devices for this brick id
-	devicelist, err := s.getDeviceList(clusterId, brickId)
-
+	devicelist, err := getDeviceListFromDB(db, clusterId, brickId)
 	if err != nil {
-		errc <- err
 		close(device)
-		return device, done, errc
+		return device, done, err
 	}
+
+	generateDevices(devicelist, device, done)
+	return device, done, nil
+}
+
+// GetNodesFromDeviceSource is a shim function that should only
+// exist as long as we keep the intermediate simple allocator.
+func (s *SimpleAllocator) GetNodesFromDeviceSource(dsrc DeviceSource,
+	brickId string) (
+	<-chan string, chan<- struct{}, error) {
+
+	device, done := make(chan string), make(chan struct{})
+
+	ring, err := loadRingFromDeviceSource(dsrc)
+	if err != nil {
+		close(device)
+		return device, done, err
+	}
+	devicelist := ring.GetDeviceList(brickId)
+
+	generateDevices(devicelist, device, done)
+	return device, done, nil
+}
+
+func generateDevices(devicelist SimpleDevices,
+	device chan<- string, done <-chan struct{}) {
 
 	// Start generator in a new goroutine
 	go func() {
 		defer func() {
-			errc <- nil
 			close(device)
 		}()
 
@@ -199,8 +151,5 @@ func (s *SimpleAllocator) GetNodes(clusterId, brickId string) (<-chan string,
 				return
 			}
 		}
-
 	}()
-
-	return device, done, errc
 }

@@ -72,8 +72,10 @@ func setupCluster(t *testing.T) {
 			defer sg.Done()
 			// Create a cluster
 			cluster_req := &api.ClusterCreateRequest{
-				Block: true,
-				File:  true,
+				ClusterFlags: api.ClusterFlags{
+					Block: true,
+					File:  true,
+				},
 			}
 			cluster, err := heketi.ClusterCreate(cluster_req)
 			if err != nil {
@@ -170,7 +172,24 @@ func teardownCluster(t *testing.T) {
 					go func(id string) {
 						defer deviceSg.Done()
 
-						err := heketi.DeviceDelete(id)
+						stateReq := &api.StateRequest{}
+						stateReq.State = api.EntryStateOffline
+						err := heketi.DeviceState(id, stateReq)
+						if err != nil {
+							logger.Err(err)
+							deviceSg.Err(err)
+							return
+						}
+
+						stateReq.State = api.EntryStateFailed
+						err = heketi.DeviceState(id, stateReq)
+						if err != nil {
+							logger.Err(err)
+							deviceSg.Err(err)
+							return
+						}
+
+						err = heketi.DeviceDelete(id)
 						if err != nil {
 							logger.Err(err)
 							deviceSg.Err(err)

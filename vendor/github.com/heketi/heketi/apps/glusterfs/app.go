@@ -10,11 +10,12 @@
 package glusterfs
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
-	"time"
 
 	"github.com/boltdb/bolt"
 	"github.com/gorilla/mux"
@@ -27,13 +28,15 @@ import (
 )
 
 const (
-	ASYNC_ROUTE               = "/queue"
-	BOLTDB_BUCKET_CLUSTER     = "CLUSTER"
-	BOLTDB_BUCKET_NODE        = "NODE"
-	BOLTDB_BUCKET_VOLUME      = "VOLUME"
-	BOLTDB_BUCKET_DEVICE      = "DEVICE"
-	BOLTDB_BUCKET_BRICK       = "BRICK"
-	BOLTDB_BUCKET_BLOCKVOLUME = "BLOCKVOLUME"
+	ASYNC_ROUTE                    = "/queue"
+	BOLTDB_BUCKET_CLUSTER          = "CLUSTER"
+	BOLTDB_BUCKET_NODE             = "NODE"
+	BOLTDB_BUCKET_VOLUME           = "VOLUME"
+	BOLTDB_BUCKET_DEVICE           = "DEVICE"
+	BOLTDB_BUCKET_BRICK            = "BRICK"
+	BOLTDB_BUCKET_BLOCKVOLUME      = "BLOCKVOLUME"
+	BOLTDB_BUCKET_DBATTRIBUTE      = "DBATTRIBUTE"
+	DB_CLUSTER_HAS_FILE_BLOCK_FLAG = "DB_CLUSTER_HAS_FILE_BLOCK_FLAG"
 )
 
 var (
@@ -46,7 +49,7 @@ type App struct {
 	db           *bolt.DB
 	dbReadOnly   bool
 	executor     executors.Executor
-	allocator    Allocator
+	_allocator   Allocator
 	conf         *GlusterFSConfig
 
 	// For testing only.  Keep access to the object
@@ -56,6 +59,7 @@ type App struct {
 
 // Use for tests only
 func NewApp(configIo io.Reader) *App {
+	var err error
 	app := &App{}
 
 	// Load configuration file
@@ -64,21 +68,28 @@ func NewApp(configIo io.Reader) *App {
 		return nil
 	}
 
+	// Set values mentioned in environmental variable
+	app.setFromEnvironmentalVariable()
+
 	// Setup loglevel
-	app.setLogLevel(app.conf.Loglevel)
+	err = SetLogLevel(app.conf.Loglevel)
+	if err != nil {
+		// just log that the log level was bad, it never failed
+		// anything in previous versions
+		logger.Err(err)
+	}
 
 	// Setup asynchronous manager
 	app.asyncManager = rest.NewAsyncHttpManager(ASYNC_ROUTE)
 
 	// Setup executor
-	var err error
-	switch {
-	case app.conf.Executor == "mock":
+	switch app.conf.Executor {
+	case "mock":
 		app.xo, err = mockexec.NewMockExecutor()
 		app.executor = app.xo
-	case app.conf.Executor == "kube" || app.conf.Executor == "kubernetes":
+	case "kube", "kubernetes":
 		app.executor, err = kubeexec.NewKubeExecutor(&app.conf.KubeConfig)
-	case app.conf.Executor == "ssh" || app.conf.Executor == "":
+	case "ssh", "":
 		app.executor, err = sshexec.NewSshExecutor(&app.conf.SshConfig)
 	default:
 		return nil
@@ -94,15 +105,13 @@ func NewApp(configIo io.Reader) *App {
 		dbfilename = app.conf.DBfile
 	}
 
-	// Setup BoltDB database
-	app.db, err = bolt.Open(dbfilename, 0600, &bolt.Options{Timeout: 3 * time.Second})
+	// Setup database
+	app.db, err = OpenDB(dbfilename, false)
 	if err != nil {
-		logger.Warning("Unable to open database.  Retrying using read only mode")
+		logger.LogError("Unable to open database: %v. Retrying using read only mode", err)
 
 		// Try opening as read-only
-		app.db, err = bolt.Open(dbfilename, 0666, &bolt.Options{
-			ReadOnly: true,
-		})
+		app.db, err = OpenDB(dbfilename, true)
 		if err != nil {
 			logger.LogError("Unable to open database: %v", err)
 			return nil
@@ -110,49 +119,14 @@ func NewApp(configIo io.Reader) *App {
 		app.dbReadOnly = true
 	} else {
 		err = app.db.Update(func(tx *bolt.Tx) error {
-			// Create Cluster Bucket
-			_, err := tx.CreateBucketIfNotExists([]byte(BOLTDB_BUCKET_CLUSTER))
+			err := initializeBuckets(tx)
 			if err != nil {
-				logger.LogError("Unable to create cluster bucket in DB")
-				return err
-			}
-
-			// Create Node Bucket
-			_, err = tx.CreateBucketIfNotExists([]byte(BOLTDB_BUCKET_NODE))
-			if err != nil {
-				logger.LogError("Unable to create node bucket in DB")
-				return err
-			}
-
-			// Create Volume Bucket
-			_, err = tx.CreateBucketIfNotExists([]byte(BOLTDB_BUCKET_VOLUME))
-			if err != nil {
-				logger.LogError("Unable to create volume bucket in DB")
-				return err
-			}
-
-			// Create Device Bucket
-			_, err = tx.CreateBucketIfNotExists([]byte(BOLTDB_BUCKET_DEVICE))
-			if err != nil {
-				logger.LogError("Unable to create device bucket in DB")
-				return err
-			}
-
-			// Create Brick Bucket
-			_, err = tx.CreateBucketIfNotExists([]byte(BOLTDB_BUCKET_BRICK))
-			if err != nil {
-				logger.LogError("Unable to create brick bucket in DB")
-				return err
-			}
-
-			_, err = tx.CreateBucketIfNotExists([]byte(BOLTDB_BUCKET_BLOCKVOLUME))
-			if err != nil {
-				logger.LogError("Unable to create blockvolume bucket in DB")
+				logger.LogError("Unable to initialize buckets")
 				return err
 			}
 
 			// Handle Upgrade Changes
-			err = app.Upgrade(tx)
+			err = UpgradeDB(tx)
 			if err != nil {
 				logger.LogError("Unable to Upgrade Changes")
 				return err
@@ -167,8 +141,29 @@ func NewApp(configIo io.Reader) *App {
 		}
 	}
 
-	// Set values mentioned in environmental variable
-	app.setFromEnvironmentalVariable()
+	// Abort the application if there are pending operations in the db.
+	// In the immediate future we need to prevent incomplete operations
+	// from piling up in the db. If there are any pending ops in the db
+	// (meaning heketi was uncleanly terminated during the op) we are
+	// simply going to refuse to start and provide offline tooling to
+	// repair the situation. In the long term we may gain the ability to
+	// auto-rollback or even try to resume some operations.
+	if HasPendingOperations(app.db) {
+		e := errors.New(
+			"Heketi was terminated while performing one or more operations." +
+				" Server may refuse to start as long as pending operations" +
+				" are present in the db.")
+		logger.Err(e)
+		logger.Info(
+			"Please refer to the Heketi troubleshooting documentation for more" +
+				" information on how to resolve this issue.")
+		if !app.conf.IgnoreStaleOperations {
+			logger.Warning("Server refusing to start.")
+			panic(e)
+		}
+		logger.Warning("Ignoring stale pending operations." +
+			"Server will be running with incomplete/inconsistent state in DB.")
+	}
 
 	// Set advanced settings
 	app.setAdvSettings()
@@ -176,25 +171,13 @@ func NewApp(configIo io.Reader) *App {
 	// Set block settings
 	app.setBlockSettings()
 
-	// Setup allocator
-	switch {
-	case app.conf.Allocator == "mock":
-		app.allocator = NewMockAllocator(app.db)
-	case app.conf.Allocator == "simple" || app.conf.Allocator == "":
-		app.conf.Allocator = "simple"
-		app.allocator = NewSimpleAllocatorFromDb(app.db)
-	default:
-		return nil
-	}
-	logger.Info("Loaded %v allocator", app.conf.Allocator)
-
 	// Show application has loaded
 	logger.Info("GlusterFS Application Loaded")
 
 	return app
 }
 
-func (a *App) setLogLevel(level string) {
+func SetLogLevel(level string) error {
 	switch level {
 	case "none":
 		logger.SetLevel(utils.LEVEL_NOLOG)
@@ -208,48 +191,35 @@ func (a *App) setLogLevel(level string) {
 		logger.SetLevel(utils.LEVEL_INFO)
 	case "debug":
 		logger.SetLevel(utils.LEVEL_DEBUG)
+	default:
+		return fmt.Errorf("invalid log level: %s", level)
 	}
-}
-
-// Upgrade Path to update all the values for new API entries
-func (a *App) Upgrade(tx *bolt.Tx) error {
-
-	err := ClusterEntryUpgrade(tx)
-	if err != nil {
-		logger.LogError("Failed to upgrade db for cluster entries")
-		return err
-	}
-
-	err = NodeEntryUpgrade(tx)
-	if err != nil {
-		logger.LogError("Failed to upgrade db for node entries")
-		return err
-	}
-
-	err = VolumeEntryUpgrade(tx)
-	if err != nil {
-		logger.LogError("Failed to upgrade db for volume entries")
-		return err
-	}
-
-	err = DeviceEntryUpgrade(tx)
-	if err != nil {
-		logger.LogError("Failed to upgrade db for device entries")
-		return err
-	}
-
-	err = BrickEntryUpgrade(tx)
-	if err != nil {
-		logger.LogError("Failed to upgrade db for brick entries: %v", err)
-		return err
-	}
-
 	return nil
 }
 
 func (a *App) setFromEnvironmentalVariable() {
 	var err error
-	env := os.Getenv("HEKETI_AUTO_CREATE_BLOCK_HOSTING_VOLUME")
+
+	// environment variable overrides file config
+	env := os.Getenv("HEKETI_EXECUTOR")
+	if env != "" {
+		a.conf.Executor = env
+	}
+
+	env = os.Getenv("HEKETI_GLUSTERAPP_LOGLEVEL")
+	if env != "" {
+		a.conf.Loglevel = env
+	}
+
+	env = os.Getenv("HEKETI_IGNORE_STALE_OPERATIONS")
+	if env != "" {
+		a.conf.IgnoreStaleOperations, err = strconv.ParseBool(env)
+		if err != nil {
+			logger.LogError("Error: While parsing HEKETI_IGNORE_STALE_OPERATIONS as bool: %v", err)
+		}
+	}
+
+	env = os.Getenv("HEKETI_AUTO_CREATE_BLOCK_HOSTING_VOLUME")
 	if "" != env {
 		a.conf.CreateBlockHostingVolumes, err = strconv.ParseBool(env)
 		if err != nil {
@@ -322,6 +292,11 @@ func (a *App) SetRoutes(router *mux.Router) error {
 			Method:      "POST",
 			Pattern:     "/clusters",
 			HandlerFunc: a.ClusterCreate},
+		rest.Route{
+			Name:        "ClusterSetFlags",
+			Method:      "POST",
+			Pattern:     "/clusters/{id:[A-Fa-f0-9]+}/flags",
+			HandlerFunc: a.ClusterSetFlags},
 		rest.Route{
 			Name:        "ClusterInfo",
 			Method:      "GET",
@@ -414,6 +389,13 @@ func (a *App) SetRoutes(router *mux.Router) error {
 			Pattern:     "/volumes",
 			HandlerFunc: a.VolumeList},
 
+		// Volume Cloning
+		rest.Route{
+			Name:        "VolumeClone",
+			Method:      "POST",
+			Pattern:     "/volumes/{id:[A-Fa-f0-9]+}/clone",
+			HandlerFunc: a.VolumeClone},
+
 		// BlockVolumes
 		rest.Route{
 			Name:        "BlockVolumeCreate",
@@ -442,6 +424,25 @@ func (a *App) SetRoutes(router *mux.Router) error {
 			Method:      "GET",
 			Pattern:     "/backup/db",
 			HandlerFunc: a.Backup},
+
+		// Db
+		rest.Route{
+			Name:        "DbDump",
+			Method:      "GET",
+			Pattern:     "/db/dump",
+			HandlerFunc: a.DbDump},
+
+		// Logging
+		rest.Route{
+			Name:        "GetLogLevel",
+			Method:      "GET",
+			Pattern:     "/internal/logging",
+			HandlerFunc: a.GetLogLevel},
+		rest.Route{
+			Name:        "SetLogLevel",
+			Method:      "POST",
+			Pattern:     "/internal/logging",
+			HandlerFunc: a.SetLogLevel},
 	}
 
 	// Register all routes from the App

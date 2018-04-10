@@ -34,6 +34,12 @@ func (a *App) VolumeCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request unable to be parsed", 422)
 		return
 	}
+	err = msg.Validate()
+	if err != nil {
+		http.Error(w, "validation failed: "+err.Error(), http.StatusBadRequest)
+		logger.LogError("validation failed: " + err.Error())
+		return
+	}
 
 	switch {
 	case msg.Gid < 0:
@@ -140,22 +146,13 @@ func (a *App) VolumeCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Add device in an asynchronous function
-	a.asyncManager.AsyncHttpRedirectFunc(w, r, func() (string, error) {
-
-		logger.Info("Creating volume %v", vol.Info.Id)
-		err := vol.Create(a.db, a.executor, a.allocator)
-		if err != nil {
-			logger.LogError("Failed to create volume: %v", err)
-			return "", err
-		}
-
-		logger.Info("Created volume %v", vol.Info.Id)
-
-		// Done
-		return "/volumes/" + vol.Info.Id, nil
-	})
-
+	vc := NewVolumeCreateOperation(vol, a.db)
+	if err := AsyncHttpOperation(a, w, r, vc); err != nil {
+		http.Error(w,
+			fmt.Sprintf("Failed to allocate new volume: %v", err),
+			http.StatusInternalServerError)
+		return
+	}
 }
 
 func (a *App) VolumeList(w http.ResponseWriter, r *http.Request) {
@@ -166,7 +163,7 @@ func (a *App) VolumeList(w http.ResponseWriter, r *http.Request) {
 	err := a.db.View(func(tx *bolt.Tx) error {
 		var err error
 
-		list.Volumes, err = VolumeList(tx)
+		list.Volumes, err = ListCompleteVolumes(tx)
 		if err != nil {
 			return err
 		}
@@ -195,9 +192,10 @@ func (a *App) VolumeInfo(w http.ResponseWriter, r *http.Request) {
 	var info *api.VolumeInfoResponse
 	err := a.db.View(func(tx *bolt.Tx) error {
 		entry, err := NewVolumeEntryFromId(tx, id)
-		if err == ErrNotFound {
+		if err == ErrNotFound || !entry.Visible() {
+			// treat an invisible entry like it doesn't exist
 			http.Error(w, "Id not found", http.StatusNotFound)
-			return err
+			return ErrNotFound
 		} else if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return err
@@ -267,25 +265,13 @@ func (a *App) VolumeDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.asyncManager.AsyncHttpRedirectFunc(w, r, func() (string, error) {
-
-		// Actually destroy the Volume here
-		err := volume.Destroy(a.db, a.executor)
-
-		// If it fails for some reason, we will need to add to the DB again
-		// or hold state on the entry "DELETING"
-
-		// Show that the key has been deleted
-		if err != nil {
-			logger.LogError("Failed to delete volume %v: %v", volume.Info.Id, err)
-			return "", err
-		}
-
-		logger.Info("Deleted volume [%s]", id)
-		return "", nil
-
-	})
-
+	vdel := NewVolumeDeleteOperation(volume, a.db)
+	if err := AsyncHttpOperation(a, w, r, vdel); err != nil {
+		http.Error(w,
+			fmt.Sprintf("Failed to set up volume delete: %v", err),
+			http.StatusInternalServerError)
+		return
+	}
 }
 
 func (a *App) VolumeExpand(w http.ResponseWriter, r *http.Request) {
@@ -301,6 +287,12 @@ func (a *App) VolumeExpand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logger.Debug("Msg: %v", msg)
+	err = msg.Validate()
+	if err != nil {
+		http.Error(w, "validation failed: "+err.Error(), http.StatusBadRequest)
+		logger.LogError("validation failed: " + err.Error())
+		return
+	}
 
 	if msg.Size < 1 {
 		http.Error(w, "Invalid volume size", http.StatusBadRequest)
@@ -328,19 +320,57 @@ func (a *App) VolumeExpand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Expand volume in an asynchronous function
-	a.asyncManager.AsyncHttpRedirectFunc(w, r, func() (string, error) {
+	ve := NewVolumeExpandOperation(volume, a.db, msg.Size)
+	if err := AsyncHttpOperation(a, w, r, ve); err != nil {
+		http.Error(w,
+			fmt.Sprintf("Failed to allocate volume expansion: %v", err),
+			http.StatusInternalServerError)
+		return
+	}
+}
 
-		logger.Info("Expanding volume %v", volume.Info.Id)
-		err := volume.Expand(a.db, a.executor, a.allocator, msg.Size)
-		if err != nil {
-			logger.LogError("Failed to expand volume %v", volume.Info.Id)
-			return "", err
+func (a *App) VolumeClone(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	vol_id := vars["id"]
+
+	var msg api.VolumeCloneRequest
+	err := utils.GetJsonFromRequest(r, &msg)
+	if err != nil {
+		http.Error(w, "request unable to be parsed", http.StatusUnprocessableEntity)
+		return
+	}
+	err = msg.Validate()
+	if err != nil {
+		http.Error(w, "validation failed: "+err.Error(),
+			http.StatusBadRequest)
+		logger.LogError("validation failed: " + err.Error())
+		return
+	}
+
+	var volume *VolumeEntry
+	err = a.db.View(func(tx *bolt.Tx) error {
+		var err error
+		volume, err = NewVolumeEntryFromId(tx, vol_id)
+		if err == ErrNotFound {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return err
+		} else if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return err
 		}
 
-		logger.Info("Expanded volume %v", volume.Info.Id)
-
-		return "/volumes/" + volume.Info.Id, nil
+		return nil
 	})
+	if err != nil {
+		return
+	}
 
+	op := NewVolumeCloneOperation(volume, a.db, msg.Name)
+	if err := AsyncHttpOperation(a, w, r, op); err != nil {
+		http.Error(w,
+			fmt.Sprintf("Failed clone volume "+
+				"%v: %v", vol_id, err),
+			http.StatusInternalServerError)
+		return
+	}
 }

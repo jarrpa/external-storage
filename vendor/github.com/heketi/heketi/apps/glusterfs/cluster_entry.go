@@ -168,5 +168,64 @@ func (c *ClusterEntry) NodeDelete(id string) {
 }
 
 func ClusterEntryUpgrade(tx *bolt.Tx) error {
+	err := addBlockFileFlagsInClusterEntry(tx)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func addBlockFileFlagsInClusterEntry(tx *bolt.Tx) error {
+	entry, err := NewDbAttributeEntryFromKey(tx, DB_CLUSTER_HAS_FILE_BLOCK_FLAG)
+	// This key won't exist if we are introducing the feature now
+	if err != nil && err != ErrNotFound {
+		return err
+	}
+
+	if err == ErrNotFound {
+		entry = NewDbAttributeEntry()
+		entry.Key = DB_CLUSTER_HAS_FILE_BLOCK_FLAG
+		entry.Value = "no"
+	} else {
+		// This case is only for future, if ever we want to set this key to "no"
+		if entry.Value == "yes" {
+			return nil
+		}
+	}
+
+	clusters, err := ClusterList(tx)
+	if err != nil {
+		return err
+	}
+	for _, cluster := range clusters {
+		clusterEntry, err := NewClusterEntryFromId(tx, cluster)
+		if err != nil {
+			return err
+		}
+		clusterEntry.Info.Block = true
+		clusterEntry.Info.File = true
+		err = clusterEntry.Save(tx)
+		if err != nil {
+			return err
+		}
+	}
+
+	entry.Value = "yes"
+	return entry.Save(tx)
+}
+
+func (c *ClusterEntry) DeleteBricksWithEmptyPath(tx *bolt.Tx) error {
+
+	for _, nodeid := range c.Info.Nodes {
+		node, err := NewNodeEntryFromId(tx, nodeid)
+		if err != nil {
+			return err
+		}
+
+		err = node.DeleteBricksWithEmptyPath(tx)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }

@@ -22,8 +22,10 @@ import (
 
 func createSampleClusterEntry() *ClusterEntry {
 	cluster_req := &api.ClusterCreateRequest{
-		Block: true,
-		File:  true,
+		ClusterFlags: api.ClusterFlags{
+			Block: true,
+			File:  true,
+		},
 	}
 	return NewClusterEntryFromRequest(cluster_req)
 }
@@ -42,8 +44,10 @@ func TestNewClusterEntry(t *testing.T) {
 func TestNewClusterEntryFromRequest(t *testing.T) {
 
 	cluster_req := &api.ClusterCreateRequest{
-		Block: true,
-		File:  true,
+		ClusterFlags: api.ClusterFlags{
+			Block: true,
+			File:  true,
+		},
 	}
 
 	c := NewClusterEntryFromRequest(cluster_req)
@@ -168,8 +172,10 @@ func TestNewClusterEntryFromId(t *testing.T) {
 
 	// Create a cluster
 	cluster_req := &api.ClusterCreateRequest{
-		Block: true,
-		File:  true,
+		ClusterFlags: api.ClusterFlags{
+			Block: true,
+			File:  true,
+		},
 	}
 	c := NewClusterEntryFromRequest(cluster_req)
 	c.NodeAdd("node_abc")
@@ -213,8 +219,10 @@ func TestNewClusterEntrySaveDelete(t *testing.T) {
 
 	// Create a cluster
 	cluster_req := &api.ClusterCreateRequest{
-		Block: true,
-		File:  true,
+		ClusterFlags: api.ClusterFlags{
+			Block: true,
+			File:  true,
+		},
 	}
 	c := NewClusterEntryFromRequest(cluster_req)
 	c.NodeAdd("node_abc")
@@ -345,8 +353,10 @@ func TestNewClusterEntryNewInfoResponse(t *testing.T) {
 
 	// Create a cluster
 	cluster_req := &api.ClusterCreateRequest{
-		Block: true,
-		File:  true,
+		ClusterFlags: api.ClusterFlags{
+			Block: true,
+			File:  true,
+		},
 	}
 	c := NewClusterEntryFromRequest(cluster_req)
 	c.NodeAdd("node_abc")
@@ -379,4 +389,81 @@ func TestNewClusterEntryNewInfoResponse(t *testing.T) {
 	tests.Assert(t, info.Id == c.Info.Id)
 	tests.Assert(t, reflect.DeepEqual(info.Nodes, c.Info.Nodes))
 	tests.Assert(t, reflect.DeepEqual(info.Volumes, c.Info.Volumes))
+}
+
+func TestUpdateClusterEntryForFlags(t *testing.T) {
+	tmpfile := tests.Tempfile()
+	defer os.Remove(tmpfile)
+
+	app := NewTestApp(tmpfile)
+
+	cluster_req := &api.ClusterCreateRequest{
+		ClusterFlags: api.ClusterFlags{
+			Block: false,
+			File:  true,
+		},
+	}
+	c := NewClusterEntryFromRequest(cluster_req)
+	c.NodeAdd("node_abc")
+	c.NodeAdd("node_def")
+
+	err := app.db.Update(func(tx *bolt.Tx) error {
+		return c.Save(tx)
+	})
+	tests.Assert(t, err == nil)
+
+	//Read the cluster info again and verify flags
+	var info *api.ClusterInfoResponse
+	err = app.db.View(func(tx *bolt.Tx) error {
+		cluster, err := NewClusterEntryFromId(tx, c.Info.Id)
+		if err != nil {
+			return err
+		}
+
+		info, err = cluster.NewClusterInfoResponse(tx)
+		if err != nil {
+			return err
+		}
+		logger.Info("file flag: %v, block flag %v", info.File, info.Block)
+		return nil
+	})
+	tests.Assert(t, err == nil)
+	tests.Assert(t, info.File == true)
+	tests.Assert(t, info.Block == false)
+
+	// remove the update flag from db
+	err = app.db.Update(func(tx *bolt.Tx) error {
+		dbaentry, err := NewDbAttributeEntryFromKey(tx, DB_CLUSTER_HAS_FILE_BLOCK_FLAG)
+		if err != nil {
+			return err
+		}
+		return dbaentry.Delete(tx)
+	})
+	tests.Assert(t, err == nil)
+	app.Close()
+
+	// Recreate the app..
+	// it will read db which does not have DB_CLUSTER_HAS_FILE_BLOCK_FLAG set and
+	// should set both flag and block attributes to true
+	app = NewTestApp(tmpfile)
+	defer app.Close()
+
+	err = app.db.View(func(tx *bolt.Tx) error {
+		cluster, err := NewClusterEntryFromId(tx, c.Info.Id)
+		if err != nil {
+			return err
+		}
+
+		info, err = cluster.NewClusterInfoResponse(tx)
+		logger.Info("file flag: %v, block flag %v", info.File, info.Block)
+		if err != nil {
+			return err
+		}
+
+		return nil
+
+	})
+	tests.Assert(t, err == nil)
+	tests.Assert(t, info.File == true)
+	tests.Assert(t, info.Block == true)
 }

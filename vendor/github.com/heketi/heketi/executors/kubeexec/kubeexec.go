@@ -24,7 +24,7 @@ import (
 	"k8s.io/kubernetes/pkg/client/unversioned/remotecommand"
 	kubeletcmd "k8s.io/kubernetes/pkg/kubelet/server/remotecommand"
 
-	"github.com/heketi/heketi/executors/sshexec"
+	"github.com/heketi/heketi/executors/cmdexec"
 	"github.com/heketi/heketi/pkg/kubernetes"
 	"github.com/heketi/heketi/pkg/utils"
 	"github.com/lpabon/godbc"
@@ -35,8 +35,7 @@ const (
 )
 
 type KubeExecutor struct {
-	// Embed all sshexecutor functions
-	sshexec.SshExecutor
+	cmdexec.CmdExecutor
 
 	// save kube configuration
 	config     *KubeConfig
@@ -145,11 +144,6 @@ func NewKubeExecutor(config *KubeConfig) (*KubeExecutor, error) {
 	if err != nil {
 		logger.Err(err)
 		return nil, fmt.Errorf("Unable to create a client set")
-	}
-
-	// Show experimental settings
-	if k.config.RebalanceOnExpansion {
-		logger.Warning("Rebalance on volume expansion has been enabled.  This is an EXPERIMENTAL feature")
 	}
 
 	godbc.Ensure(k != nil)

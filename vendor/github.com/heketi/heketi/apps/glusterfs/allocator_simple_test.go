@@ -23,74 +23,37 @@ func TestNewSimpleAllocator(t *testing.T) {
 
 	a := NewSimpleAllocator()
 	tests.Assert(t, a != nil)
-	tests.Assert(t, a.rings != nil)
 
 }
 
-func TestSimpleAllocatorEmpty(t *testing.T) {
+func TestSimpleAllocatorGetNodesEmpty(t *testing.T) {
+	tmpfile := tests.Tempfile()
+	defer os.Remove(tmpfile)
+
+	// Setup database
+	app := NewTestApp(tmpfile)
+	defer app.Close()
+
+	// Create large cluster
+	err := setupSampleDbWithTopology(app,
+		0, // clusters
+		0, // nodes_per_cluster
+		0, // devices_per_node,
+		0, // disksize)
+	)
+	tests.Assert(t, err == nil)
+
 	a := NewSimpleAllocator()
 	tests.Assert(t, a != nil)
 
-	err := a.RemoveDevice(createSampleClusterEntry(),
-		createSampleNodeEntry(),
-		createSampleDeviceEntry("aaa", 10))
+	ch, done, err := a.GetNodes(app.db, utils.GenUUID(), utils.GenUUID())
+	defer close(done)
 	tests.Assert(t, err == ErrNotFound)
 
-	err = a.RemoveCluster("aaa")
-	tests.Assert(t, err == ErrNotFound)
-
-	ch, _, errc := a.GetNodes(utils.GenUUID(), utils.GenUUID())
 	for d := range ch {
-		tests.Assert(t, false, d)
+		tests.Assert(t, false,
+			"Ring should be empty, but we got a device id:", d)
 	}
-	err = <-errc
-	tests.Assert(t, err == ErrNotFound)
-}
-
-func TestSimpleAllocatorAddRemoveDevice(t *testing.T) {
-	a := NewSimpleAllocator()
-	tests.Assert(t, a != nil)
-
-	cluster := createSampleClusterEntry()
-	node := createSampleNodeEntry()
-	node.Info.ClusterId = cluster.Info.Id
-	device := createSampleDeviceEntry(node.Info.Id, 10000)
-
-	tests.Assert(t, len(a.rings) == 0)
-	err := a.AddDevice(cluster, node, device)
-	tests.Assert(t, err == nil)
-	tests.Assert(t, len(a.rings) == 1)
-	tests.Assert(t, a.rings[cluster.Info.Id] != nil)
-
-	// Get the nodes from the ring
-	ch, _, errc := a.GetNodes(cluster.Info.Id, utils.GenUUID())
-
-	var devices int
-	for d := range ch {
-		devices++
-		tests.Assert(t, d == device.Info.Id)
-	}
-	err = <-errc
-	tests.Assert(t, devices == 1)
-	tests.Assert(t, err == nil)
-
-	// Now remove the device
-	err = a.RemoveDevice(cluster, node, device)
-	tests.Assert(t, err == nil)
-	tests.Assert(t, len(a.rings) == 1)
-
-	// Get the nodes from the ring
-	ch, _, errc = a.GetNodes(cluster.Info.Id, utils.GenUUID())
-
-	devices = 0
-	for d := range ch {
-		devices++
-		tests.Assert(t, false, d)
-	}
-	err = <-errc
-	tests.Assert(t, devices == 0)
-	tests.Assert(t, err == nil)
-
 }
 
 func TestSimpleAllocatorInitFromDb(t *testing.T) {
@@ -125,20 +88,20 @@ func TestSimpleAllocatorInitFromDb(t *testing.T) {
 	tests.Assert(t, err == nil)
 
 	// Create an allocator and initialize it from the DB
-	a := NewSimpleAllocatorFromDb(app.db)
+	a := NewSimpleAllocator()
 	tests.Assert(t, a != nil)
 
 	// Get the nodes from the ring
-	ch, _, errc := a.GetNodes(clusterId, utils.GenUUID())
+	ch, done, err := a.GetNodes(app.db, clusterId, utils.GenUUID())
+	defer close(done)
+	tests.Assert(t, err == nil)
 
 	var devices int
 	for d := range ch {
 		devices++
 		tests.Assert(t, d != "")
 	}
-	err = <-errc
 	tests.Assert(t, devices == 10*20)
-	tests.Assert(t, err == nil)
 
 }
 
@@ -160,7 +123,7 @@ func TestSimpleAllocatorInitFromDbWithOfflineDevices(t *testing.T) {
 	tests.Assert(t, err == nil)
 
 	// Get the cluster list
-	var clusterId, nodeId string
+	var clusterId string
 	err = app.db.Update(func(tx *bolt.Tx) error {
 		clusters, err := ClusterList(tx)
 		if err != nil {
@@ -176,7 +139,6 @@ func TestSimpleAllocatorInitFromDbWithOfflineDevices(t *testing.T) {
 		// devices are added to the ring
 		node, err := cluster.NodeEntryFromClusterIndex(tx, 0)
 		tests.Assert(t, err == nil)
-		nodeId = node.Info.Id
 		node.State = api.EntryStateOffline
 		node.Save(tx)
 
@@ -191,19 +153,19 @@ func TestSimpleAllocatorInitFromDbWithOfflineDevices(t *testing.T) {
 	tests.Assert(t, err == nil)
 
 	// Create an allocator and initialize it from the DB
-	a := NewSimpleAllocatorFromDb(app.db)
+	a := NewSimpleAllocator()
 	tests.Assert(t, a != nil)
 
 	// Get the nodes from the ring
-	ch, _, errc := a.GetNodes(clusterId, utils.GenUUID())
+	ch, done, err := a.GetNodes(app.db, clusterId, utils.GenUUID())
+	defer close(done)
+	tests.Assert(t, err == nil)
 
 	var devices int
 	for d := range ch {
 		devices++
 		tests.Assert(t, d != "")
 	}
-	err = <-errc
-	tests.Assert(t, err == nil)
 
 	// Only three online devices should be in the list
 	tests.Assert(t, devices == 3, devices)

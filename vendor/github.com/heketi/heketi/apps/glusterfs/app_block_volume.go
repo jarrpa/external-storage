@@ -11,6 +11,7 @@ package glusterfs
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/boltdb/bolt"
@@ -28,15 +29,16 @@ func (a *App) BlockVolumeCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if msg.Size < 1 {
-		http.Error(w, "Invalid volume size", http.StatusBadRequest)
-		logger.LogError("Invalid volume size")
+	err = msg.Validate()
+	if err != nil {
+		http.Error(w, "validation failed: "+err.Error(), http.StatusBadRequest)
+		logger.LogError("validation failed: " + err.Error())
 		return
 	}
 
-	if msg.Size > BlockHostingVolumeSize {
-		err := logger.LogError("Default Block Hosting Volume size is less than block volume requested.")
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if msg.Size < 1 {
+		http.Error(w, "Invalid volume size", http.StatusBadRequest)
+		logger.LogError("Invalid volume size")
 		return
 	}
 
@@ -74,20 +76,13 @@ func (a *App) BlockVolumeCreate(w http.ResponseWriter, r *http.Request) {
 
 	blockVolume := NewBlockVolumeEntryFromRequest(&msg)
 
-	// Add device in an asynchronous function
-	a.asyncManager.AsyncHttpRedirectFunc(w, r, func() (string, error) {
-
-		logger.Info("Creating block volume %v", blockVolume.Info.Id)
-		err := blockVolume.Create(a.db, a.executor, a.allocator)
-		if err != nil {
-			logger.LogError("Failed to create block volume: %v", err)
-			return "", err
-		}
-
-		logger.Info("Created block volume %v", blockVolume.Info.Id)
-
-		return "/blockvolumes/" + blockVolume.Info.Id, nil
-	})
+	bvc := NewBlockVolumeCreateOperation(blockVolume, a.db)
+	if err := AsyncHttpOperation(a, w, r, bvc); err != nil {
+		http.Error(w,
+			fmt.Sprintf("Failed to allocate new block volume: %v", err),
+			http.StatusInternalServerError)
+		return
+	}
 }
 
 func (a *App) BlockVolumeList(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +92,7 @@ func (a *App) BlockVolumeList(w http.ResponseWriter, r *http.Request) {
 	err := a.db.View(func(tx *bolt.Tx) error {
 		var err error
 
-		list.BlockVolumes, err = BlockVolumeList(tx)
+		list.BlockVolumes, err = ListCompleteBlockVolumes(tx)
 		if err != nil {
 			return err
 		}
@@ -128,9 +123,9 @@ func (a *App) BlockVolumeInfo(w http.ResponseWriter, r *http.Request) {
 	var info *api.BlockVolumeInfoResponse
 	err := a.db.View(func(tx *bolt.Tx) error {
 		entry, err := NewBlockVolumeEntryFromId(tx, id)
-		if err == ErrNotFound {
+		if err == ErrNotFound || !entry.Visible() {
 			http.Error(w, "Id not found", http.StatusNotFound)
-			return err
+			return ErrNotFound
 		} else if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return err
@@ -178,19 +173,11 @@ func (a *App) BlockVolumeDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.asyncManager.AsyncHttpRedirectFunc(w, r, func() (string, error) {
-
-		err := blockVolume.Destroy(a.db, a.executor)
-
-		// TODO: If it fails for some reason, we will need to add to the DB again
-		// or hold state on the entry "DELETING"
-
-		if err != nil {
-			logger.LogError("Failed to delete volume %v: %v", blockVolume.Info.Id, err)
-			return "", err
-		}
-
-		logger.Info("Deleted volume [%s]", id)
-		return "", nil
-	})
+	vdel := NewBlockVolumeDeleteOperation(blockVolume, a.db)
+	if err := AsyncHttpOperation(a, w, r, vdel); err != nil {
+		http.Error(w,
+			fmt.Sprintf("Failed to set up block volume delete: %v", err),
+			http.StatusInternalServerError)
+		return
+	}
 }

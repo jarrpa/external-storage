@@ -12,9 +12,11 @@ package glusterfs
 import (
 	"bytes"
 	"encoding/gob"
+	"strings"
 
 	"github.com/boltdb/bolt"
 	"github.com/heketi/heketi/executors"
+	wdb "github.com/heketi/heketi/pkg/db"
 	"github.com/heketi/heketi/pkg/glusterfs/api"
 	"github.com/heketi/heketi/pkg/utils"
 	"github.com/lpabon/godbc"
@@ -25,6 +27,7 @@ type BrickEntry struct {
 	TpSize           uint64
 	PoolMetadataSize uint64
 	gidRequested     int64
+	Pending          PendingItem
 }
 
 func BrickList(tx *bolt.Tx) ([]string, error) {
@@ -53,6 +56,7 @@ func NewBrickEntry(size, tpsize, poolMetadataSize uint64,
 	entry.Info.NodeId = nodeid
 	entry.Info.DeviceId = deviceid
 	entry.Info.VolumeId = volumeid
+	entry.UpdatePath()
 
 	godbc.Ensure(entry.Info.Id != "")
 	godbc.Ensure(entry.TpSize == tpsize)
@@ -75,12 +79,28 @@ func NewBrickEntryFromId(tx *bolt.Tx, id string) (*BrickEntry, error) {
 	return entry, nil
 }
 
+func CloneBrickEntryFromId(tx *bolt.Tx, id string) (*BrickEntry, error) {
+	godbc.Require(tx != nil)
+	godbc.Require(id != "")
+
+	entry := &BrickEntry{}
+	err := EntryLoad(tx, entry, id)
+	if err != nil {
+		return nil, err
+	}
+
+	entry.Info.Id = utils.GenUUID()
+
+	return entry, nil
+}
+
 func (b *BrickEntry) BucketName() string {
 	return BOLTDB_BUCKET_BRICK
 }
 
 func (b *BrickEntry) SetId(id string) {
 	b.Info.Id = id
+	b.UpdatePath()
 }
 
 func (b *BrickEntry) Id() string {
@@ -123,10 +143,11 @@ func (b *BrickEntry) Unmarshal(buffer []byte) error {
 	return nil
 }
 
-func (b *BrickEntry) Create(db *bolt.DB, executor executors.Executor) error {
+func (b *BrickEntry) Create(db wdb.RODB, executor executors.Executor) error {
 	godbc.Require(db != nil)
 	godbc.Require(b.TpSize > 0)
 	godbc.Require(b.Info.Size > 0)
+	godbc.Require(b.Info.Path != "")
 
 	// Get node hostname
 	var host string
@@ -152,21 +173,20 @@ func (b *BrickEntry) Create(db *bolt.DB, executor executors.Executor) error {
 	req.TpSize = b.TpSize
 	req.VgId = b.Info.DeviceId
 	req.PoolMetadataSize = b.PoolMetadataSize
+	req.Path = b.Info.Path
+	// remove this some time post-refactoring
+	godbc.Require(req.Path == utils.BrickPath(req.VgId, req.Name))
 
 	// Create brick on node
 	logger.Info("Creating brick %v", b.Info.Id)
-	info, err := executor.BrickCreate(host, req)
+	_, err = executor.BrickCreate(host, req)
 	if err != nil {
 		return err
 	}
-	b.Info.Path = info.Path
-
-	godbc.Ensure(b.Info.Path != "")
-
 	return nil
 }
 
-func (b *BrickEntry) Destroy(db *bolt.DB, executor executors.Executor) error {
+func (b *BrickEntry) Destroy(db wdb.RODB, executor executors.Executor) (bool, error) {
 
 	godbc.Require(db != nil)
 	godbc.Require(b.TpSize > 0)
@@ -185,7 +205,7 @@ func (b *BrickEntry) Destroy(db *bolt.DB, executor executors.Executor) error {
 		return nil
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Create request
@@ -193,19 +213,21 @@ func (b *BrickEntry) Destroy(db *bolt.DB, executor executors.Executor) error {
 	req.Name = b.Info.Id
 	req.Size = b.Info.Size
 	req.TpSize = b.TpSize
+	req.PoolMetadataSize = b.PoolMetadataSize
 	req.VgId = b.Info.DeviceId
+	req.Path = strings.TrimSuffix(b.Info.Path, "/brick")
 
 	// Delete brick on node
 	logger.Info("Deleting brick %v", b.Info.Id)
-	err = executor.BrickDestroy(host, req)
+	spaceReclaimed, err := executor.BrickDestroy(host, req)
 	if err != nil {
-		return err
+		return spaceReclaimed, err
 	}
 
-	return nil
+	return spaceReclaimed, nil
 }
 
-func (b *BrickEntry) DestroyCheck(db *bolt.DB, executor executors.Executor) error {
+func (b *BrickEntry) DestroyCheck(db wdb.RODB, executor executors.Executor) error {
 	godbc.Require(db != nil)
 	godbc.Require(b.TpSize > 0)
 	godbc.Require(b.Info.Size > 0)
@@ -222,19 +244,9 @@ func (b *BrickEntry) DestroyCheck(db *bolt.DB, executor executors.Executor) erro
 		godbc.Check(host != "")
 		return nil
 	})
-	if err != nil {
-		return err
-	}
 
-	// Create request
-	req := &executors.BrickRequest{}
-	req.Name = b.Info.Id
-	req.Size = b.Info.Size
-	req.TpSize = b.TpSize
-	req.VgId = b.Info.DeviceId
-
-	// Check brick on node
-	return executor.BrickDestroyCheck(host, req)
+	// TODO: any additional checks in the DB? The detection of the VG/LV and its users is done in cmdexec.BrickDestroy()
+	return err
 }
 
 // Size consumed on device
@@ -282,5 +294,30 @@ func addVolumeIdInBrickEntry(tx *bolt.Tx) error {
 			}
 		}
 	}
+	return nil
+}
+
+func (b *BrickEntry) UpdatePath() {
+	b.Info.Path = utils.BrickPath(b.Info.DeviceId, b.Info.Id)
+}
+
+func (b *BrickEntry) RemoveFromDevice(tx *bolt.Tx) error {
+	// Access device
+	device, err := NewDeviceEntryFromId(tx, b.Info.DeviceId)
+	if err != nil {
+		logger.Err(err)
+		return err
+	}
+
+	// Delete brick from device
+	device.BrickDelete(b.Info.Id)
+
+	// Save device
+	err = device.Save(tx)
+	if err != nil {
+		logger.Err(err)
+		return err
+	}
+
 	return nil
 }

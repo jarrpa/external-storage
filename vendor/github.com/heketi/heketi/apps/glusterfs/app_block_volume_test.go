@@ -23,8 +23,8 @@ import (
 	"github.com/boltdb/bolt"
 	"github.com/gorilla/mux"
 	"github.com/heketi/heketi/pkg/glusterfs/api"
+	"github.com/heketi/heketi/pkg/utils"
 	"github.com/heketi/tests"
-	"github.com/heketi/utils"
 )
 
 func TestBlockVolumeCreateBadJson(t *testing.T) {
@@ -102,7 +102,7 @@ func TestBlockVolumeCreateInvalidSize(t *testing.T) {
 	body, err := ioutil.ReadAll(io.LimitReader(r.Body, r.ContentLength))
 	tests.Assert(t, err == nil)
 	r.Body.Close()
-	tests.Assert(t, strings.Contains(string(body), "Invalid volume size"))
+	tests.Assert(t, strings.Contains(string(body), "size: cannot be blank"), string(body))
 }
 
 func TestBlockVolumeCreateBadClusters(t *testing.T) {
@@ -164,25 +164,53 @@ func TestBlockVolumeLargerThanBlockHostingVolume(t *testing.T) {
 	// Setup database
 	err := setupSampleDbWithTopology(app,
 		1,    // clusters
-		10,   // nodes_per_cluster
-		10,   // devices_per_node,
-		5*TB, // disksize)
+		3,    // nodes_per_cluster
+		1,    // devices_per_node,
+		2*TB, // disksize)
 	)
 	tests.Assert(t, err == nil)
+	var info api.BlockVolumeInfoResponse
 
-	// BlockVolumeCreate
+	// Create a small blockvolume to auto create block hosting volume
 	request := []byte(`{
-        "size" : 1500
+        "size" : 1
     }`)
-
-	// Send request
 	r, err := http.Post(ts.URL+"/blockvolumes", "application/json", bytes.NewBuffer(request))
 	tests.Assert(t, err == nil)
-	tests.Assert(t, r.StatusCode == http.StatusBadRequest)
+	tests.Assert(t, r.StatusCode == http.StatusAccepted)
+	location, err := r.Location()
+	tests.Assert(t, err == nil)
+
+	for {
+		r, err = http.Get(location.String())
+		tests.Assert(t, err == nil)
+		if r.Header.Get("X-Pending") == "true" {
+			tests.Assert(t, r.StatusCode == http.StatusOK)
+			time.Sleep(time.Millisecond * 10)
+		} else {
+			tests.Assert(t, r.StatusCode == http.StatusOK, "got", r.StatusCode)
+			err := utils.GetJsonFromResponse(r, &info)
+			tests.Assert(t, err == nil)
+			tests.Assert(t, info.Id != "")
+			break
+		}
+	}
+
+	// now create blockvolume request which can't fit in existing 500 GiB
+	// blockhosting volume and any new blockhosting volume that can
+	// be created
+	request = []byte(`{
+        "size" : 1600
+    }`)
+	r, err = http.Post(ts.URL+"/blockvolumes", "application/json", bytes.NewBuffer(request))
+	tests.Assert(t, err == nil)
+	// NOTE: as of the pending operations work this now fails faster with
+	// an out of space error on the submission, not in the async reply
+	tests.Assert(t, r.StatusCode == http.StatusInternalServerError)
 	body, err := ioutil.ReadAll(io.LimitReader(r.Body, r.ContentLength))
 	tests.Assert(t, err == nil)
 	r.Body.Close()
-	tests.Assert(t, strings.Contains(string(body), "Default Block Hosting Volume size is less than block volume requested."))
+	tests.Assert(t, strings.Contains(string(body), "Failed to allocate new block volume: The size configured for automatic creation of block hosting volumes (1024) is too small to host the requested block volume of size 1600. Please create a sufficiently large block hosting volume manually."), "got", string(body))
 }
 
 func TestBlockVolumeCreate(t *testing.T) {
@@ -300,7 +328,7 @@ func TestBlockVolumeInfo(t *testing.T) {
 	v := NewBlockVolumeEntryFromRequest(req)
 	tests.Assert(t, v != nil)
 	tests.Assert(t, v.Info.Auth == true)
-	err = v.Create(app.db, app.executor, app.allocator)
+	err = v.Create(app.db, app.executor)
 	tests.Assert(t, err == nil)
 
 	// Now that we have some data in the database, we can
@@ -531,7 +559,7 @@ func TestBlockVolumeDelete(t *testing.T) {
 	// Create a volume
 	v := createSampleBlockVolumeEntry(100)
 	tests.Assert(t, v != nil)
-	err = v.Create(app.db, app.executor, app.allocator)
+	err = v.Create(app.db, app.executor)
 	tests.Assert(t, err == nil)
 
 	// Delete the volume

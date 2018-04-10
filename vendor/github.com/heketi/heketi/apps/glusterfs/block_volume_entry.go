@@ -16,13 +16,15 @@ import (
 
 	"github.com/boltdb/bolt"
 	"github.com/heketi/heketi/executors"
+	wdb "github.com/heketi/heketi/pkg/db"
 	"github.com/heketi/heketi/pkg/glusterfs/api"
 	"github.com/heketi/heketi/pkg/utils"
 	"github.com/lpabon/godbc"
 )
 
 type BlockVolumeEntry struct {
-	Info api.BlockVolumeInfo
+	Info    api.BlockVolumeInfo
+	Pending PendingItem
 }
 
 func BlockVolumeList(tx *bolt.Tx) ([]string, error) {
@@ -33,11 +35,8 @@ func BlockVolumeList(tx *bolt.Tx) ([]string, error) {
 	return list, nil
 }
 
-// Creates a File volume to host block volumes
-func CreateBlockHostingVolume(db *bolt.DB, executor executors.Executor, allocator Allocator, clusters []string) (*VolumeEntry, error) {
+func NewVolumeEntryForBlockHosting(clusters []string) (*VolumeEntry, error) {
 	var msg api.VolumeCreateRequest
-	var err error
-
 	msg.Clusters = clusters
 	msg.Durability.Type = api.DurabilityReplicate
 	msg.Size = BlockHostingVolumeSize
@@ -47,21 +46,18 @@ func CreateBlockHostingVolume(db *bolt.DB, executor executors.Executor, allocato
 
 	vol := NewVolumeEntryFromRequest(&msg)
 
+	if !CreateBlockHostingVolumes {
+		return nil, fmt.Errorf("Block Hosting Volume Creation is " +
+			"disabled. Create a Block hosting volume and try " +
+			"again.")
+	}
+
 	if uint64(msg.Size)*GB < vol.Durability.MinVolumeSize() {
 		return nil, fmt.Errorf("Requested volume size (%v GB) is "+
 			"smaller than the minimum supported volume size (%v)",
 			msg.Size, vol.Durability.MinVolumeSize())
 	}
-
-	err = vol.Create(db, executor, allocator)
-	if err != nil {
-		logger.LogError("Failed to create Block Hosting Volume: %v", err)
-		return nil, err
-	}
-
-	logger.Info("Block Hosting Volume created (name[%v] id[%v] ", vol.Info.Name, vol.Info.Id)
-
-	return vol, err
+	return vol, nil
 }
 
 func NewBlockVolumeEntry() *BlockVolumeEntry {
@@ -105,6 +101,10 @@ func NewBlockVolumeEntryFromId(tx *bolt.Tx, id string) (*BlockVolumeEntry, error
 
 func (v *BlockVolumeEntry) BucketName() string {
 	return BOLTDB_BUCKET_BLOCKVOLUME
+}
+
+func (v *BlockVolumeEntry) Visible() bool {
+	return v.Pending.Id == ""
 }
 
 func (v *BlockVolumeEntry) Save(tx *bolt.Tx) error {
@@ -151,22 +151,9 @@ func (v *BlockVolumeEntry) Unmarshal(buffer []byte) error {
 	return nil
 }
 
-func (v *BlockVolumeEntry) Create(db *bolt.DB,
-	executor executors.Executor,
-	allocator Allocator) (e error) {
+func (v *BlockVolumeEntry) eligibleClustersAndVolumes(db wdb.RODB) (
+	possibleClusters []string, volumes []*VolumeEntry, e error) {
 
-	// On any error, remove the volume
-	defer func() {
-		if e != nil {
-			db.Update(func(tx *bolt.Tx) error {
-				v.Delete(tx)
-
-				return nil
-			})
-		}
-	}()
-
-	var possibleClusters []string
 	if len(v.Info.Clusters) == 0 {
 		err := db.View(func(tx *bolt.Tx) error {
 			var err error
@@ -174,41 +161,23 @@ func (v *BlockVolumeEntry) Create(db *bolt.DB,
 			return err
 		})
 		if err != nil {
-			return err
+			e = err
+			return
 		}
 	} else {
 		possibleClusters = v.Info.Clusters
 	}
 
-	//
-	// If there are any clusters marked with the Block
-	// flag, then only consider those. Otherwise consider
-	// all clusters.
-	//
-	var blockClusters []string
-	for _, clusterId := range possibleClusters {
-		err := db.View(func(tx *bolt.Tx) error {
-			var err error
-			c, err := NewClusterEntryFromId(tx, clusterId)
-			if err != nil {
-				return err
-			}
-			if c.Info.Block {
-				blockClusters = append(blockClusters, clusterId)
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
+	// find clusters that support block volumes
+	cr := ClusterReq{Block: true}
+	possibleClusters, e = eligibleClusters(db, cr, possibleClusters)
+	if e != nil {
+		return
 	}
-	if blockClusters != nil {
-		possibleClusters = blockClusters
-	}
-
 	if len(possibleClusters) == 0 {
-		logger.LogError("BlockVolume being ask to be created, but there are no clusters configured")
-		return ErrNoSpace
+		logger.LogError("No clusters eligible to satisfy create block volume request")
+		e = ErrNoSpace
+		return
 	}
 	logger.Debug("Using the following clusters: %+v", possibleClusters)
 
@@ -222,90 +191,67 @@ func (v *BlockVolumeEntry) Create(db *bolt.DB,
 				if err != nil {
 					return err
 				}
-				if volEntry.Info.Block {
+				if volEntry.Info.Block && volEntry.Pending.Id == "" {
 					possibleVolumes = append(possibleVolumes, vol)
 				}
 			}
 			return err
 		})
 		if err != nil {
-			return err
+			e = err
+			return
 		}
 	}
 
 	logger.Debug("Using the following possible block hosting volumes: %+v", possibleVolumes)
 
-	var volumes []string
 	for _, vol := range possibleVolumes {
 		err := db.View(func(tx *bolt.Tx) error {
 			volEntry, err := NewVolumeEntryFromId(tx, vol)
 			if err != nil {
 				return err
 			}
-			if volEntry.Info.BlockInfo.FreeSize >= v.Info.Size {
-				for _, blockvol := range volEntry.Info.BlockInfo.BlockVolumes {
-					bv, err := NewBlockVolumeEntryFromId(tx, blockvol)
-					if err != nil {
-						return err
-					}
-					if v.Info.Name == bv.Info.Name {
-						return fmt.Errorf("Name %v already in use in file volume %v",
-							v.Info.Name, volEntry.Info.Name)
-					}
-				}
-				volumes = append(volumes, vol)
-			} else {
-				return fmt.Errorf("Free size is lesser than the block volume requested")
+			if ok, err := canHostBlockVolume(tx, v, volEntry); ok {
+				volumes = append(volumes, volEntry)
+			} else if err != nil {
+				return err
 			}
 			return nil
 		})
 		if err != nil {
-			logger.Warning("%v", err.Error())
+			e = err
+			return
 		}
 	}
+	return
+}
 
-	var blockHostingVolume string
-	if len(volumes) == 0 {
-		logger.Info("No block hosting volumes found in the cluster list")
-		if !CreateBlockHostingVolumes {
-			return fmt.Errorf("Block Hosting Volume Creation is Disabled. Create a Block hosting volume and try again.")
-		}
-		// Create block hosting volume to host block volumes
-		bhvol, err := CreateBlockHostingVolume(db, executor, allocator, v.Info.Clusters)
-		if err != nil {
-			return err
-		}
-		blockHostingVolume = bhvol.Info.Id
-	} else {
-		blockHostingVolume = volumes[0]
-	}
+func (v *BlockVolumeEntry) cleanupBlockVolumeCreate(db wdb.DB,
+	executor executors.Executor) error {
 
-	logger.Debug("Using block hosting volume id[%v]", blockHostingVolume)
-
-	defer func() {
-		if e != nil {
-			db.Update(func(tx *bolt.Tx) error {
-				// removal of stuff that was created in the db
-				return nil
-			})
-		}
-	}()
-	// Create the block volume on the block hosting volume specified
-	err := v.createBlockVolume(db, executor, blockHostingVolume)
+	hvname, err := v.blockHostingVolumeName(db)
 	if err != nil {
 		return err
 	}
 
-	defer func() {
-		if e != nil {
-			v.Destroy(db, executor)
-		}
-	}()
+	// best effort removal of anything on system
+	v.deleteBlockVolumeExec(db, hvname, executor)
 
-	err = db.Update(func(tx *bolt.Tx) error {
-		v.Info.BlockHostingVolume = blockHostingVolume
+	return v.removeComponents(db)
+}
 
-		err = v.Save(tx)
+func (v *BlockVolumeEntry) Create(db wdb.DB,
+	executor executors.Executor) (e error) {
+
+	return RunOperation(
+		NewBlockVolumeCreateOperation(v, db),
+		executor)
+}
+
+func (v *BlockVolumeEntry) saveCreateBlockVolume(db wdb.DB) error {
+	return db.Update(func(tx *bolt.Tx) error {
+
+		err := v.Save(tx)
 		if err != nil {
 			return err
 		}
@@ -322,7 +268,7 @@ func (v *BlockVolumeEntry) Create(db *bolt.DB,
 			return err
 		}
 
-		volume, err := NewVolumeEntryFromId(tx, blockHostingVolume)
+		volume, err := NewVolumeEntryFromId(tx, v.Info.BlockHostingVolume)
 		if err != nil {
 			return err
 		}
@@ -337,33 +283,24 @@ func (v *BlockVolumeEntry) Create(db *bolt.DB,
 
 		return err
 	})
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
-func (v *BlockVolumeEntry) Destroy(db *bolt.DB, executor executors.Executor) error {
-	logger.Info("Destroying volume %v", v.Info.Id)
-
-	var blockHostingVolumeName string
-	var err error
-
-	db.View(func(tx *bolt.Tx) error {
+func (v *BlockVolumeEntry) blockHostingVolumeName(db wdb.RODB) (name string, e error) {
+	e = db.View(func(tx *bolt.Tx) error {
 		volume, err := NewVolumeEntryFromId(tx, v.Info.BlockHostingVolume)
 		if err != nil {
 			logger.LogError("Unable to load block hosting volume: %v", err)
 			return err
 		}
-		blockHostingVolumeName = volume.Info.Name
+		name = volume.Info.Name
 		return nil
 	})
-	if err != nil {
-		return err
-	}
+	return
+}
 
-	logger.Debug("Using blockosting volume name[%v]", blockHostingVolumeName)
+func (v *BlockVolumeEntry) deleteBlockVolumeExec(db wdb.RODB,
+	hvname string,
+	executor executors.Executor) error {
 
 	executorhost, err := GetVerifiedManageHostname(db, executor, v.Info.Cluster)
 	if err != nil {
@@ -372,15 +309,16 @@ func (v *BlockVolumeEntry) Destroy(db *bolt.DB, executor executors.Executor) err
 
 	logger.Debug("Using executor host [%v]", executorhost)
 
-	err = executor.BlockVolumeDestroy(executorhost, blockHostingVolumeName, v.Info.Name)
+	err = executor.BlockVolumeDestroy(executorhost, hvname, v.Info.Name)
 	if err != nil {
 		logger.LogError("Unable to delete volume: %v", err)
 		return err
 	}
+	return nil
+}
 
-	logger.Debug("Destroyed backend volume")
-
-	err = db.Update(func(tx *bolt.Tx) error {
+func (v *BlockVolumeEntry) removeComponents(db wdb.DB) error {
+	return db.Update(func(tx *bolt.Tx) error {
 		// Remove volume from cluster
 		cluster, err := NewClusterEntryFromId(tx, v.Info.Cluster)
 		if err != nil {
@@ -417,6 +355,37 @@ func (v *BlockVolumeEntry) Destroy(db *bolt.DB, executor executors.Executor) err
 
 		return nil
 	})
+}
 
-	return err
+func (v *BlockVolumeEntry) Destroy(db wdb.DB, executor executors.Executor) error {
+	logger.Info("Destroying volume %v", v.Info.Id)
+
+	return RunOperation(
+		NewBlockVolumeDeleteOperation(v, db),
+		executor)
+}
+
+// canHostBlockVolume returns true if the existing volume entry object
+// can host the incoming block volume. It returns false (and nil error) if
+// the volume is incompatible. It returns false, and an error if the
+// database operation fails.
+func canHostBlockVolume(tx *bolt.Tx, bv *BlockVolumeEntry, vol *VolumeEntry) (bool, error) {
+	if vol.Info.BlockInfo.FreeSize < bv.Info.Size {
+		logger.Warning("Free size is less than the block volume requested")
+		return false, nil
+	}
+
+	for _, blockvol := range vol.Info.BlockInfo.BlockVolumes {
+		existingbv, err := NewBlockVolumeEntryFromId(tx, blockvol)
+		if err != nil {
+			return false, err
+		}
+		if bv.Info.Name == existingbv.Info.Name {
+			logger.Warning("Name %v already in use in file volume %v",
+				bv.Info.Name, vol.Info.Name)
+			return false, nil
+		}
+	}
+
+	return true, nil
 }

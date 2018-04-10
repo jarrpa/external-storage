@@ -28,11 +28,6 @@ import (
 	"github.com/heketi/tests"
 )
 
-func init() {
-	// turn off logging
-	logger.SetLevel(utils.LEVEL_NOLOG)
-}
-
 func TestNodeAddBadRequests(t *testing.T) {
 	tmpfile := tests.Tempfile()
 	defer os.Remove(tmpfile)
@@ -112,7 +107,8 @@ func TestNodeAddBadRequests(t *testing.T) {
 	tests.Assert(t, r.StatusCode == http.StatusBadRequest)
 	s, err := utils.GetStringFromResponse(r)
 	tests.Assert(t, err == nil)
-	tests.Assert(t, strings.Contains(s, "empty string"))
+	tests.Assert(t, strings.Contains(s, "is not a valid manage hostname"), s)
+	tests.Assert(t, strings.Contains(s, "is not a valid storage hostname"), s)
 
 	// Make a request where the zone is missing
 	request = []byte(`{
@@ -129,11 +125,11 @@ func TestNodeAddBadRequests(t *testing.T) {
 	tests.Assert(t, r.StatusCode == http.StatusBadRequest)
 	s, err = utils.GetStringFromResponse(r)
 	tests.Assert(t, err == nil)
-	tests.Assert(t, strings.Contains(s, "Zone cannot be zero"))
+	tests.Assert(t, strings.Contains(s, "zone: cannot be blank"), s)
 
 	// Make a request where the cluster id does not exist
 	request = []byte(`{
-		"cluster" : "123",
+		"cluster" : "3071582c8575a06d824f6bfc125eb270",
 		"hostnames" : {
 			"storage" : [ "storage.hostname.com" ],
 			"manage" : [ "manage.hostname.com"  ]
@@ -1039,18 +1035,16 @@ func TestNodeState(t *testing.T) {
 	ts := httptest.NewServer(router)
 	defer ts.Close()
 
-	// Create mock allocator
-	mockAllocator := NewMockAllocator(app.db)
-	app.allocator = mockAllocator
-
 	// Create a client
 	c := client.NewClientNoAuth(ts.URL)
 	tests.Assert(t, c != nil)
 
 	// Create Cluster
 	cluster_req := &api.ClusterCreateRequest{
-		Block: true,
-		File:  true,
+		ClusterFlags: api.ClusterFlags{
+			Block: true,
+			File:  true,
+		},
 	}
 	cluster, err := c.ClusterCreate(cluster_req)
 	tests.Assert(t, err == nil)
@@ -1088,10 +1082,6 @@ func TestNodeState(t *testing.T) {
 	tests.Assert(t, err == nil)
 	tests.Assert(t, deviceInfo.State == "online")
 
-	// Check that the device is in the ring
-	tests.Assert(t, len(mockAllocator.clustermap[cluster.Id]) == 1)
-	tests.Assert(t, mockAllocator.clustermap[cluster.Id][0] == device.Id)
-
 	// Set node offline
 	request := []byte(`{
 				"state" : "offline"
@@ -1117,9 +1107,6 @@ func TestNodeState(t *testing.T) {
 		}
 	}
 
-	// Check it was removed from the ring
-	tests.Assert(t, len(mockAllocator.clustermap[cluster.Id]) == 0)
-
 	// Get node info
 	node, err = c.NodeInfo(node.Id)
 	tests.Assert(t, err == nil)
@@ -1133,9 +1120,6 @@ func TestNodeState(t *testing.T) {
 		"application/json", bytes.NewBuffer(request))
 	tests.Assert(t, err == nil)
 	tests.Assert(t, r.StatusCode == http.StatusAccepted)
-
-	// Check it was removed from the ring
-	tests.Assert(t, len(mockAllocator.clustermap[cluster.Id]) == 0)
 
 	// Get node info
 	node, err = c.NodeInfo(node.Id)
@@ -1167,10 +1151,6 @@ func TestNodeState(t *testing.T) {
 		}
 	}
 
-	// Check that the device is in the ring
-	tests.Assert(t, len(mockAllocator.clustermap[cluster.Id]) == 1)
-	tests.Assert(t, mockAllocator.clustermap[cluster.Id][0] == device.Id)
-
 	// Set online again, should succeed
 	request = []byte(`{
 				"state" : "online"
@@ -1196,10 +1176,6 @@ func TestNodeState(t *testing.T) {
 		}
 	}
 
-	// Check that the device is in the ring
-	tests.Assert(t, len(mockAllocator.clustermap[cluster.Id]) == 1)
-	tests.Assert(t, mockAllocator.clustermap[cluster.Id][0] == device.Id)
-
 	// Get node info
 	node, err = c.NodeInfo(node.Id)
 	tests.Assert(t, err == nil)
@@ -1212,27 +1188,7 @@ func TestNodeState(t *testing.T) {
 	r, err = http.Post(ts.URL+"/nodes/"+node.Id+"/state",
 		"application/json", bytes.NewBuffer(request))
 	tests.Assert(t, err == nil)
-	tests.Assert(t, r.StatusCode == http.StatusAccepted)
-
-	location, err = r.Location()
-	tests.Assert(t, err == nil)
-
-	// Query queue until finished
-	for {
-		r, err = http.Get(location.String())
-		tests.Assert(t, err == nil)
-		if r.Header.Get("X-Pending") == "true" {
-			tests.Assert(t, r.StatusCode == http.StatusOK)
-			time.Sleep(time.Millisecond * 10)
-		} else {
-			tests.Assert(t, r.StatusCode == http.StatusInternalServerError)
-			break
-		}
-	}
-
-	// Check that the device is still in the ring
-	tests.Assert(t, len(mockAllocator.clustermap[cluster.Id]) == 1)
-	tests.Assert(t, mockAllocator.clustermap[cluster.Id][0] == device.Id)
+	tests.Assert(t, r.StatusCode == http.StatusBadRequest)
 
 	// Check node is still online
 	node, err = c.NodeInfo(node.Id)
@@ -1264,9 +1220,6 @@ func TestNodeState(t *testing.T) {
 		}
 	}
 
-	// Check it was removed from the ring
-	tests.Assert(t, len(mockAllocator.clustermap[cluster.Id]) == 0)
-
 	// Set Node offline
 	request = []byte(`{
 				"state" : "offline"
@@ -1291,9 +1244,6 @@ func TestNodeState(t *testing.T) {
 			break
 		}
 	}
-
-	// Check it was removed from the ring
-	tests.Assert(t, len(mockAllocator.clustermap[cluster.Id]) == 0)
 
 	// Set Node online -- Device is still offline and should not be added
 	request = []byte(`{
@@ -1320,9 +1270,6 @@ func TestNodeState(t *testing.T) {
 		}
 	}
 
-	// Check device is not in ring
-	tests.Assert(t, len(mockAllocator.clustermap[cluster.Id]) == 0)
-
 	// Now make device online
 	request = []byte(`{
 				"state" : "online"
@@ -1347,11 +1294,6 @@ func TestNodeState(t *testing.T) {
 			break
 		}
 	}
-
-	// Now it should be back in the ring
-	tests.Assert(t, len(mockAllocator.clustermap[cluster.Id]) == 1)
-	tests.Assert(t, mockAllocator.clustermap[cluster.Id][0] == device.Id)
-
 }
 
 func TestNodeInfoAfterDelete(t *testing.T) {
@@ -1368,18 +1310,16 @@ func TestNodeInfoAfterDelete(t *testing.T) {
 	ts := httptest.NewServer(router)
 	defer ts.Close()
 
-	// Create mock allocator
-	mockAllocator := NewMockAllocator(app.db)
-	app.allocator = mockAllocator
-
 	// Create a client
 	c := client.NewClientNoAuth(ts.URL)
 	tests.Assert(t, c != nil)
 
 	// Create Cluster
 	cluster_req := &api.ClusterCreateRequest{
-		Block: true,
-		File:  true,
+		ClusterFlags: api.ClusterFlags{
+			Block: true,
+			File:  true,
+		},
 	}
 	cluster, err := c.ClusterCreate(cluster_req)
 	tests.Assert(t, err == nil)
@@ -1423,9 +1363,6 @@ func TestNodeInfoAfterDelete(t *testing.T) {
 			break
 		}
 	}
-
-	// Check it was removed from the ring
-	tests.Assert(t, len(mockAllocator.clustermap[cluster.Id]) == 0)
 
 	// Get node info
 	node, err = c.NodeInfo(node.Id)
